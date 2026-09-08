@@ -11,7 +11,9 @@ describe('SHADOW_EXECUTION_SAFETY_POLICY (amendment §I)', () => {
     }
     const decision = classifyShadowWorkload(d)
     expect(decision.eligible).toBe(false)
-    if (!decision.eligible) expect(decision.code).toBe('prohibited_capability')
+    if (!decision.eligible) {
+      expect(decision.code).toBe('prohibited_capability')
+    }
   })
 
   it('rejects a repo_local_code_only workload that still declares a network mutation', () => {
@@ -30,7 +32,9 @@ describe('SHADOW_EXECUTION_SAFETY_POLICY (amendment §I)', () => {
       declaredCapabilities: []
     })
     expect(decision.eligible).toBe(false)
-    if (!decision.eligible) expect(decision.code).toBe('external_effect_without_isolation')
+    if (!decision.eligible) {
+      expect(decision.code).toBe('external_effect_without_isolation')
+    }
   })
 
   it('rejects external_effect whose isolation strategy has no independent acceptance', () => {
@@ -41,11 +45,17 @@ describe('SHADOW_EXECUTION_SAFETY_POLICY (amendment §I)', () => {
       isolationStrategy: { kind: 'dry_run', acceptedBy: '', note: 'planned' }
     })
     expect(decision.eligible).toBe(false)
-    if (!decision.eligible) expect(decision.code).toBe('isolation_not_accepted')
+    if (!decision.eligible) {
+      expect(decision.code).toBe('isolation_not_accepted')
+    }
   })
 
   it('accepts a synthetic workload with no declared capabilities', () => {
-    const decision = classifyShadowWorkload({ id: 'w5', kind: 'synthetic', declaredCapabilities: [] })
+    const decision = classifyShadowWorkload({
+      id: 'w5',
+      kind: 'synthetic',
+      declaredCapabilities: []
+    })
     expect(decision.eligible).toBe(true)
   })
 

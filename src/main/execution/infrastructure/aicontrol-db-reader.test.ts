@@ -12,7 +12,9 @@ import {
 describe('AiControlDbReader zero authoritative write (amendment §S gate 4)', () => {
   const cleanups: (() => void)[] = []
   afterEach(() => {
-    while (cleanups.length) cleanups.pop()?.()
+    while (cleanups.length) {
+      cleanups.pop()?.()
+    }
   })
 
   function fixtureDb(): string {
@@ -31,8 +33,8 @@ describe('AiControlDbReader zero authoritative write (amendment §S gate 4)', ()
     reader.close()
     const after = sha256File(path)
     expect(after).toBe(before)
-    expect(existsSync(path + '-wal')).toBe(false)
-    expect(existsSync(path + '-shm')).toBe(false)
+    expect(existsSync(`${path}-wal`)).toBe(false)
+    expect(existsSync(`${path}-shm`)).toBe(false)
     expect(entries.length).toBe(FROZEN_SAMPLE_REQUEST.slots.length)
   })
 

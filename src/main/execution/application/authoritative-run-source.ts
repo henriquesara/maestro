@@ -35,7 +35,7 @@ export type SampleEntry =
   | { kind: 'record'; record: AuthoritativeRunRecord; profile: string }
   | { kind: 'unavailable'; profile: string; reason: 'sample_source_unavailable' }
 
-export interface AuthoritativeRunSource {
+export type AuthoritativeRunSource = {
   /** Read-only. Resolves each requested slot to a real authoritative row, or marks it unavailable. */
   resolveSample(request: SampleRequest): SampleEntry[]
 }

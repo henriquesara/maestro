@@ -52,9 +52,9 @@ CREATE TABLE IF NOT EXISTS execution_meta (
 
 export function migrateExecutionStore(db: SyncDatabase): void {
   db.exec(CREATE_SQL)
-  const row = db
-    .prepare("SELECT value FROM execution_meta WHERE key = 'schema_version'")
-    .get() as { value: string } | undefined
+  const row = db.prepare("SELECT value FROM execution_meta WHERE key = 'schema_version'").get() as
+    | { value: string }
+    | undefined
   if (!row) {
     db.prepare("INSERT INTO execution_meta (key, value) VALUES ('schema_version', ?)").run(
       String(EXECUTION_SCHEMA_VERSION)

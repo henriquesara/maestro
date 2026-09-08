@@ -50,7 +50,7 @@ export class ExecutionPlaneError extends Error {
  * (e.g. the Orca adapter). Advisory only — nothing here touches an authoritative
  * run or `data/app.db`.
  */
-export interface ExecutionPlane {
+export type ExecutionPlane = {
   openShadowRun(input: {
     sliceRef: string
     workloadId: string

@@ -19,9 +19,22 @@ import {
 } from '../../domain/execution-identity'
 import type { ExecutionOutcome } from '../../domain/parity'
 
+// A parseable Orca coordinator pane key, matching the shape Orca's own
+// orchestration tests use.
+export const COORD_PANE_KEY = 'tab_coord:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+
 export function makeTmpDir(prefix: string): { dir: string; cleanup: () => void } {
   const dir = mkdtempSync(join(tmpdir(), prefix))
-  return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) }
+  return {
+    dir,
+    cleanup: () => {
+      try {
+        rmSync(dir, { recursive: true, force: true, maxRetries: 3 })
+      } catch {
+        // best-effort: Windows can briefly hold a just-closed sqlite handle
+      }
+    }
+  }
 }
 
 /** Minimal sqlite file shaped like aiControlCenter `data/app.db` (only the columns the reader touches). */
@@ -36,65 +49,32 @@ export function writeFixtureAppDb(path: string): void {
   const ins = db.prepare(
     'INSERT INTO agent_runs (id, agent_id, status, files_changed, duration_ms, created_at) VALUES (?, ?, ?, ?, ?, ?)'
   )
+  // Two rows per (agent, status) so the reader's per-pair cursor binds each of
+  // the 6 frozen slots to a distinct authoritative row. The 2nd completed-A row
+  // carries a recorded `files_changed` (SPEC.md §10 row 2 — the deliberate,
+  // *comparable* files-changed divergence); every other row's is null (legacy).
   const rows: [string, string, string, string | null, number, number][] = [
     ['run_a_1', 'agent-A', 'completed', null, 1200, 1],
-    ['run_a_2', 'agent-A', 'completed', null, 900, 2],
+    ['run_a_2', 'agent-A', 'completed', '["src/recorded-x.txt","src/recorded-y.txt"]', 900, 2],
     ['run_b_1', 'agent-B', 'failed', null, 300, 3],
     ['run_b_2', 'agent-B', 'failed', null, 250, 4],
     ['run_c_1', 'agent-C', 'cancelled', null, 100, 5],
     ['run_c_2', 'agent-C', 'cancelled', null, 80, 6]
   ]
-  for (const r of rows) ins.run(...r)
+  for (const r of rows) {
+    ins.run(...r)
+  }
   db.close()
 }
 
-export function syntheticWorkload(id: string, steps: SyntheticWorkload['steps']): SyntheticWorkload {
+export function syntheticWorkload(
+  id: string,
+  steps: SyntheticWorkload['steps']
+): SyntheticWorkload {
   return { id, steps }
 }
 
-const synthetic = (id: string) =>
-  ({ id, kind: 'synthetic', declaredCapabilities: [] }) as const
-
-function slot(
-  profile: string,
-  agentIndex: number,
-  status: 'completed' | 'failed' | 'cancelled',
-  id: string,
-  steps: SyntheticWorkload['steps']
-) {
-  return { profile, agentIndex, status, descriptor: synthetic(id), workload: syntheticWorkload(id, steps) }
-}
-
-export const FROZEN_SAMPLE_REQUEST: SampleRequest = {
-  slots: [
-    slot('A', 0, 'completed', 's1', [
-      { op: 'write', path: 'src/a.txt', content: '1' },
-      { op: 'write', path: 'src/b.txt', content: '2' },
-      { op: 'exit', code: 0 }
-    ]),
-    slot('A', 0, 'completed', 's2', [
-      { op: 'write', path: 'src/c.txt', content: '3' },
-      { op: 'delete', path: 'src/a.txt' },
-      { op: 'exit', code: 0 }
-    ]),
-    slot('B', 1, 'failed', 's3', [
-      { op: 'write', path: 'src/d.txt', content: '4' },
-      { op: 'exit', code: 1 }
-    ]),
-    slot('B', 1, 'failed', 's4', [
-      { op: 'write', path: 'src/e.txt', content: '5' },
-      { op: 'exit', code: 2 }
-    ]),
-    slot('C', 2, 'cancelled', 's5', [
-      { op: 'write', path: 'src/f.txt', content: '6' },
-      { op: 'cancel', midFlight: false }
-    ]),
-    slot('C', 2, 'cancelled', 's6', [
-      { op: 'write', path: 'src/g.txt', content: '7' },
-      { op: 'cancel', midFlight: true }
-    ])
-  ]
-}
+export { FROZEN_SAMPLE_REQUEST } from './frozen-sample'
 
 export function outcome(partial: Partial<ExecutionOutcome>): ExecutionOutcome {
   return {

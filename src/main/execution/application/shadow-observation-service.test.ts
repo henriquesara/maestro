@@ -44,7 +44,11 @@ describe('runShadowObservation — I2 (no plane call for ineligible) + I5 (crash
       agentId: `agent-${slot.profile}`,
       recordedOutcome: outcome({
         terminalOutcome:
-          slot.status === 'completed' ? 'completed' : slot.status === 'failed' ? 'failed' : 'cancelled'
+          slot.status === 'completed'
+            ? 'completed'
+            : slot.status === 'failed'
+              ? 'failed'
+              : 'cancelled'
       }),
       descriptor: slot.descriptor,
       workload: slot.workload

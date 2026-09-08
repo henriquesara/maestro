@@ -36,17 +36,17 @@ contract; they never read or write Execution's private tables.
 
 ## 3. Ubiquitous / domain language
 
-| Term | Meaning in this slice |
-|---|---|
-| Authoritative run | An aiControlCenter `agent_runs` row. The sole correctness authority for its execution. Read-only here. |
-| Shadow run | An Orca dispatch created by this slice purely to observe. Advisory only. Never influences an authoritative run. |
-| `RunBinding` | The durable identity map between an authoritative run, its governed AgentRun handle, and its Orca shadow refs. Persisted by the owning module; never reconstructed heuristically. |
-| `SyntheticWorkload` | A deterministic, repo-local, code-only sequence of file mutations (+ optional exit / cancel markers). The only kind of workload this slice dispatches. |
-| `WorkloadDescriptor` | Declared kind + declared capabilities + optional isolation strategy. Input to the safety policy. |
-| `ExecutionOutcome` | `{ terminalOutcome, exitDisposition, cancellationBehavior, filesChanged }`. Computed for both sides. |
-| `ParityObservation` | `{ binding, authoritative outcome, shadow outcome, parity result, rootCause }`. Complete only when every divergence has a non-empty root cause. |
-| `WorkloadExclusion` | A record that an ineligible workload was refused **before** any `ExecutionPlane` call. |
-| Opaque ref | `OrcaRunRef` / `OrcaDispatchRef` / `AiControlRunRef` / `GovernanceAgentRunRef` / `OrgTaskRef` — branded strings. No Orca row type crosses the port. |
+| Term                 | Meaning in this slice                                                                                                                                                             |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Authoritative run    | An aiControlCenter `agent_runs` row. The sole correctness authority for its execution. Read-only here.                                                                            |
+| Shadow run           | An Orca dispatch created by this slice purely to observe. Advisory only. Never influences an authoritative run.                                                                   |
+| `RunBinding`         | The durable identity map between an authoritative run, its governed AgentRun handle, and its Orca shadow refs. Persisted by the owning module; never reconstructed heuristically. |
+| `SyntheticWorkload`  | A deterministic, repo-local, code-only sequence of file mutations (+ optional exit / cancel markers). The only kind of workload this slice dispatches.                            |
+| `WorkloadDescriptor` | Declared kind + declared capabilities + optional isolation strategy. Input to the safety policy.                                                                                  |
+| `ExecutionOutcome`   | `{ terminalOutcome, exitDisposition, cancellationBehavior, filesChanged }`. Computed for both sides.                                                                              |
+| `ParityObservation`  | `{ binding, authoritative outcome, shadow outcome, parity result, rootCause }`. Complete only when every divergence has a non-empty root cause.                                   |
+| `WorkloadExclusion`  | A record that an ineligible workload was refused **before** any `ExecutionPlane` call.                                                                                            |
+| Opaque ref           | `OrcaRunRef` / `OrcaDispatchRef` / `AiControlRunRef` / `GovernanceAgentRunRef` / `OrgTaskRef` — branded strings. No Orca row type crosses the port.                               |
 
 ## 4. Invariants
 
@@ -125,7 +125,7 @@ Per ineligible workload:
 - `parity_observation` rows (one per settled shadow run).
 - `workload_exclusion` rows (one per refused ineligible workload).
 - A `ShadowObservationReport` value: `{ bindings, observations, exclusions,
-  divergences, dbGuard: { pathHashBefore, pathHashAfter, sidecarsPresent } }`.
+divergences, dbGuard: { pathHashBefore, pathHashAfter, sidecarsPresent } }`.
 
 ## 9. Failure semantics
 
@@ -157,32 +157,53 @@ present in the real `data/app.db` (verified: `select count(distinct agent_id)
 from agent_runs` = 3), so the authoritative side of the sample is drawn from
 real authoritative rows, not invented.
 
-| # | Profile | Authoritative source (real `agent_runs`) | Synthetic shadow workload | Expected parity |
-|---|---|---|---|---|
-| 1 | A | a real `completed` row for agent A | write 2 files, `exit 0` | MATCH on all 4 dimensions |
-| 2 | A | a real `completed` row for agent A | write 1 file, delete 1 file, `exit 0` | MATCH terminal/exit/cancel; **files-changed divergence** (shadow set ≠ recorded set — recorded `files_changed` is null on legacy rows) → root cause: `legacy_authoritative_files_changed_unrecorded` |
-| 3 | B | a real `failed` row for agent B | write 1 file, `exit 1` | MATCH: `failed` / `non_zero_exit` |
-| 4 | B | a real `failed` row for agent B | write 1 file, `exit 2` | MATCH: `failed` / `non_zero_exit` |
-| 5 | C | a real `cancelled` row for agent C | write 1 file, `cancel(midFlight=false)` | MATCH: `cancelled` / `cancelled_clean` |
-| 6 | C | a real `cancelled` row for agent C | write 1 file, `cancel(midFlight=true)` | MATCH terminal (`cancelled`); **cancellation-behavior divergence** (`cancelled_mid_flight` vs recorded `cancelled_clean`) → root cause: `authoritative_cancellation_granularity_not_recorded` |
+Each of the 6 slots binds to a **distinct** real `agent_runs` row (the reader
+advances a per-(agent, status) cursor), so `aicontrol_run_id` is unique across
+the whole sample — a second slot for the same (agent, status) reads the next
+row, never the same one.
 
-Divergences in rows 2 and 6 are **expected** and prove I7. Any *unexpected*
-divergence is a slice failure and must be root-caused before acceptance.
+| #   | Profile | Authoritative source (real `agent_runs`)                                   | Synthetic shadow workload               | Expected parity                                                                                                                                                                                         |
+| --- | ------- | -------------------------------------------------------------------------- | --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | A       | 1st real `completed` row for agent A (`files_changed` null)                | write 2 files, `exit 0`                 | MATCH on all _comparable_ dimensions (`files_changed` = `not_comparable`)                                                                                                                               |
+| 2   | A       | 2nd real `completed` row for agent A — **with a recorded `files_changed`** | write 1 file, delete 1 file, `exit 0`   | MATCH terminal/exit/cancel; **deliberate `files_changed` divergence** (recorded set ≠ shadow synthetic set) → root cause `shadow_synthetic_workload_not_replayable`                                     |
+| 3   | B       | 1st real `failed` row for agent B                                          | write 1 file, `exit 1`                  | MATCH: `failed` / `non_zero_exit` (`files_changed` = `not_comparable`)                                                                                                                                  |
+| 4   | B       | 2nd real `failed` row for agent B                                          | write 1 file, `exit 2`                  | MATCH: `failed` / `non_zero_exit` (`files_changed` = `not_comparable`)                                                                                                                                  |
+| 5   | C       | 1st real `cancelled` row for agent C                                       | write 1 file, `cancel(midFlight=false)` | MATCH: `cancelled` / `cancelled_clean` (`files_changed` = `not_comparable`)                                                                                                                             |
+| 6   | C       | 2nd real `cancelled` row for agent C                                       | write 1 file, `cancel(midFlight=true)`  | MATCH terminal (`cancelled`); **deliberate cancellation-behavior divergence** (`cancelled_mid_flight` vs recorded `cancelled_clean`) → root cause `authoritative_cancellation_granularity_not_recorded` |
 
-If the real `data/app.db` lacks a row for a required (profile, status) pair, the
-slice records a `WorkloadExclusion` of kind `sample_source_unavailable` for that
-entry and the parity sample is reported as partial — it is never silently
-back-filled with an invented authoritative outcome.
+Divergences in rows 2 and 6 are **expected** and prove I7. Any _other_ divergence
+is a slice failure and must be root-caused before acceptance.
+
+`files_changed` is compared **only when the authoritative side recorded it**
+(non-null). When the recorded value is null (legacy rows), that dimension is
+`not_comparable` for that run — reported on the observation, but not a
+`match: false` divergence. This is why row 2's fixture row carries a recorded
+`files_changed`: without it there is no _comparable_ files-changed dimension to
+exercise.
+
+If the real `data/app.db` lacks enough distinct rows for a required
+(profile, status, occurrence) triple, the slice records a `WorkloadExclusion` of
+kind `sample_source_unavailable` and the parity sample is reported as partial —
+never silently back-filled with an invented authoritative outcome.
 
 **Assumption, declared (not silent):** at `AICONTROL_NATIVE` the aiControlCenter
 web app is not running and is read-only, so a shadow run cannot replay a real
-coding-agent turn. The authoritative side of the parity comparison is therefore
-the **recorded outcome** of a real `agent_runs` row (terminal status → terminal
-outcome + exit disposition + cancellation behavior; `files_changed` when
-present, else null), and the shadow side runs a **synthetic equivalent**
-workload. Files-changed parity against legacy null `files_changed` is expected to
-diverge and is root-caused, not treated as a defect. Replaying real agent turns
-belongs to a later stage, not ORCA-S1.
+coding-agent turn. The authoritative side of the parity comparison is the
+**recorded outcome** of a real `agent_runs` row (terminal status → terminal
+outcome + exit disposition + cancellation behavior; `files_changed` only when
+recorded), and the shadow side runs a **synthetic equivalent** workload.
+Replaying real agent turns belongs to a later stage, not ORCA-S1.
+
+> **Spec revision 2026-09-08 (pre-acceptance, recorded).** The original §10
+> drafted 6 slots against "a real row per (profile, status)" (3 rows), which
+> collides with the `aicontrol_run_id` UNIQUE constraint on the 2nd slot of each
+> profile, and drafted `files_changed` as always-diverging on legacy nulls
+> (contradicting the row-1 "MATCH on all 4 dimensions" line). Revised — while the
+> slice is still `READY_FOR_REVIEW`, not yet independently accepted — to: (a) one
+> **distinct** authoritative row per slot via a per-(agent, status) cursor;
+> (b) `files_changed` compared only when recorded, else `not_comparable`;
+> (c) row 2's fixture row carries a recorded `files_changed` so the deliberate
+> files-changed divergence is a _comparable_ one. N = 6 / M = 3 unchanged.
 
 ## 11. Acceptance criteria (mirrors amendment §S gates 1–9)
 

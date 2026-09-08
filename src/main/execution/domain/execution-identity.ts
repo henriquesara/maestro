@@ -59,9 +59,12 @@ export type RunBinding = {
 /**
  * I4 — a settlement / association may only use the Dispatch ref this binding was
  * created with. A wrong or stale ref is rejected here, before it reaches Orca.
- * RED: not implemented yet.
  */
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-export function assertBoundDispatch(_binding: RunBinding, _dispatchRef: OrcaDispatchRef): void {
-  throw new Error('NOT_IMPLEMENTED: I4 assertBoundDispatch')
+export function assertBoundDispatch(binding: RunBinding, dispatchRef: OrcaDispatchRef): void {
+  if (binding.orcaDispatchId !== dispatchRef) {
+    throw new RunBindingError(
+      'dispatch_mismatch',
+      `Dispatch ${dispatchRef} is not the bound Dispatch (${binding.orcaDispatchId}) for AgentRun ${binding.governanceAgentRunId}.`
+    )
+  }
 }

@@ -15,7 +15,7 @@ export type WorkloadExclusion = {
   excludedAt: string
 }
 
-export interface ExecutionStore {
+export type ExecutionStore = {
   /** Throws RunBindingError('duplicate_dispatch'|'duplicate_aicontrol_run') on a uniqueness violation. */
   recordBinding(binding: RunBinding): void
   getBindingByDispatch(orcaDispatchId: string): RunBinding | undefined

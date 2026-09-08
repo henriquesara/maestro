@@ -1,28 +1,34 @@
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
-import { runProcessSync } from '../../../shared/child-process/run-process'
 import type { OrchestrationDb } from '../../runtime/orchestration/db'
+import type { TaskRow } from '../../runtime/orchestration/types'
 import {
   ExecutionPlaneError,
   type ExecutionPlane,
-  type ShadowExecutionResult,
-  type SyntheticWorkload
+  type OpenedShadowRun
 } from '../application/execution-plane'
 import {
   makeOrcaDispatchRef,
   makeOrcaRunRef,
   makeOrgTaskRef,
+  type CorrelationId,
   type GovernanceAgentRunRef,
   type OrcaDispatchRef,
   type OrcaRunRef,
   type OrgTaskRef
 } from '../domain/execution-identity'
-import { filesChangedSet, type ExecutionOutcome } from '../domain/parity'
+import type { ExecutionOutcome } from '../domain/parity'
+import type { ShadowExecutionResult, WorkloadSpec } from '../domain/workload-spec'
+import { applyWorkload, git, initSeededWorktree, toExecutionOutcome } from './workload-git-runtime'
 
 // Execution bounded context — infrastructure. The Orca adapter: implements the
-// ExecutionPlane port over a *shadow* OrchestrationDb + disposable git worktrees.
-// Orca row types never leave this file (amendment §P.6). Advisory only — this
-// never touches an authoritative run or data/app.db.
+// ExecutionPlane over a *shadow* OrchestrationDb + disposable git worktrees.
+// Orca row types never leave this file (amendment §P.6). Advisory only.
+//
+// Blocker B2: the correlation id is written into the shadow task `spec` so it is
+// durable ON THE ORCA SIDE and a crash after Dispatch creation reconciles
+// deterministically. Blocker B3: settleShadow / runShadowWorkload validate that
+// the Dispatch genuinely belongs to the given run on the production path.
+
+const CORRELATION_KEY = 'orcaS1CorrelationId'
 
 type ShadowRunState = {
   taskId: string
@@ -31,74 +37,72 @@ type ShadowRunState = {
   baseCommit: string
 }
 
-function git(args: string[], cwd: string): string {
-  const result = runProcessSync({ program: 'git', args, cwd, timeoutMs: 20_000 })
-  if (result.code !== 0) {
-    throw new ExecutionPlaneError(
-      'run_failed',
-      `git ${args.join(' ')} failed: ${result.stderr.trim()}`
-    )
+function parseCorrelation(spec: string): string | undefined {
+  try {
+    const parsed = JSON.parse(spec) as Record<string, unknown>
+    const value = parsed[CORRELATION_KEY]
+    return typeof value === 'string' ? value : undefined
+  } catch {
+    return undefined
   }
-  return result.stdout.trim()
 }
 
 export class OrcaExecutionPlane implements ExecutionPlane {
-  private readonly runs = new Map<string, ShadowRunState>()
+  // Within-call cache ONLY — never the correctness authority (blocker B2). Every
+  // path falls back to the shadow OrchestrationDb keyed by correlation id.
+  private readonly cache = new Map<string, ShadowRunState>()
 
   constructor(
     private readonly orchestration: OrchestrationDb,
-    private readonly coordinatorPaneKey: string,
-    private readonly worktreeFactory: (workloadId: string) => string
+    private readonly coordinatorPaneKey: string
   ) {}
 
   async openShadowRun(input: {
     sliceRef: string
     workloadId: string
-    baseCommit: string
+    correlationId: CorrelationId
     governanceAgentRunId: GovernanceAgentRunRef
-  }): Promise<{
-    orcaRunRef: OrcaRunRef
-    orcaDispatchRef: OrcaDispatchRef
-    orgTaskRef: OrgTaskRef
-  }> {
+    worktreeDir: string
+    seededFiles: readonly { path: string; content: string }[]
+    postBaseFiles: readonly { path: string; content: string }[]
+  }): Promise<OpenedShadowRun> {
     try {
       const run = this.orchestration.createRun({
-        objective: `${input.sliceRef} shadow: ${input.workloadId}`,
-        coordinatorHandle: 'term_shadow_coord',
+        objective: `${input.sliceRef} shadow ${input.workloadId}`,
+        coordinatorHandle: 'term_orca_s1_shadow_coord',
         coordinatorPaneKey: this.coordinatorPaneKey
       })
       const task = this.orchestration.createTask({
-        spec: `shadow workload ${input.workloadId}`,
+        spec: JSON.stringify({
+          [CORRELATION_KEY]: String(input.correlationId),
+          sliceRef: input.sliceRef,
+          workloadId: input.workloadId
+        }),
         runId: run.id
       })
       const dispatch = this.orchestration.createDispatchContext({
         taskId: task.id,
-        assigneeHandle: `term_shadow_${input.workloadId}`,
+        assigneeHandle: `term_orca_s1_shadow_${input.workloadId}`,
         creator: { kind: 'system' },
         maxDepth: Number.MAX_SAFE_INTEGER
       })
 
-      const worktreeDir = this.worktreeFactory(input.workloadId)
-      mkdirSync(worktreeDir, { recursive: true })
-      git(['init', '-q'], worktreeDir)
-      git(['config', 'user.email', 'shadow@orca-s1.local'], worktreeDir)
-      git(['config', 'user.name', 'orca-s1-shadow'], worktreeDir)
-      git(['config', 'commit.gpgsign', 'false'], worktreeDir)
-      writeFileSync(join(worktreeDir, '.orca-s1-seed'), 'seed\n')
-      git(['add', '-A'], worktreeDir)
-      git(['commit', '-q', '-m', 'shadow base'], worktreeDir)
-      const baseCommit = git(['rev-parse', 'HEAD'], worktreeDir)
-
-      this.runs.set(String(dispatch.id), {
+      const baseCommit = initSeededWorktree(
+        input.worktreeDir,
+        input.seededFiles,
+        input.postBaseFiles
+      )
+      this.cache.set(String(dispatch.id), {
         taskId: task.id,
         runId: run.id,
-        worktreeDir,
+        worktreeDir: input.worktreeDir,
         baseCommit
       })
       return {
         orcaRunRef: makeOrcaRunRef(run.id),
         orcaDispatchRef: makeOrcaDispatchRef(dispatch.id),
-        orgTaskRef: makeOrgTaskRef(task.id)
+        orgTaskRef: makeOrgTaskRef(task.id),
+        baseCommit
       }
     } catch (error) {
       if (error instanceof ExecutionPlaneError) {
@@ -109,51 +113,17 @@ export class OrcaExecutionPlane implements ExecutionPlane {
   }
 
   async runShadowWorkload(input: {
+    orcaRunRef: OrcaRunRef
     orcaDispatchRef: OrcaDispatchRef
-    workload: SyntheticWorkload
-    worktreeDir: string
+    workload: WorkloadSpec
   }): Promise<ShadowExecutionResult> {
-    const state = this.requireRun(input.orcaDispatchRef)
-    let exitCode: number | null = null
-    let cancelled = false
-    let cancelledMidFlight = false
-    const touched: string[] = []
-
-    for (const step of input.workload.steps) {
-      if (step.op === 'write') {
-        const full = join(state.worktreeDir, step.path)
-        mkdirSync(dirname(full), { recursive: true })
-        writeFileSync(full, step.content)
-        touched.push(step.path)
-      } else if (step.op === 'delete') {
-        rmSync(join(state.worktreeDir, step.path), { force: true })
-        touched.push(step.path)
-      } else if (step.op === 'exit') {
-        exitCode = step.code
-        break
-      } else if (step.op === 'cancel') {
-        cancelled = true
-        cancelledMidFlight = step.midFlight
-        break
-      }
-    }
-
-    git(['add', '-A'], state.worktreeDir)
-    // Allow an empty commit so a pure cancel still advances HEAD deterministically.
-    git(['commit', '-q', '--allow-empty', '-m', `shadow ${input.workload.id}`], state.worktreeDir)
-    const filesChanged = git(
-      ['diff', '--name-only', `${state.baseCommit}..HEAD`],
-      state.worktreeDir
-    )
-      .split('\n')
-      .map((l) => l.trim())
-      .filter((l) => l.length > 0)
-
+    const state = this.requirePair(input.orcaRunRef, input.orcaDispatchRef)
+    const result = applyWorkload(input.workload, state.worktreeDir, state.baseCommit)
     return {
-      exitCode: cancelled ? null : exitCode,
-      filesChanged: filesChangedSet([...touched, ...filesChanged]),
-      cancelled,
-      cancelledMidFlight
+      exitCode: result.exitCode,
+      filesChanged: result.filesChanged,
+      cancelled: result.cancelled,
+      cancelledMidFlight: result.cancelledMidFlight
     }
   }
 
@@ -162,16 +132,7 @@ export class OrcaExecutionPlane implements ExecutionPlane {
     orcaDispatchRef: OrcaDispatchRef
     result: ShadowExecutionResult
   }): Promise<{ candidateHead: string; outcome: ExecutionOutcome }> {
-    const state = this.requireRun(input.orcaDispatchRef)
-    // I4 — Orca itself rejects a settlement whose (taskId, dispatchId) do not
-    // match; this guard makes the check explicit and testable at the port.
-    const dispatchRow = this.orchestration.getDispatchContextById(String(input.orcaDispatchRef))
-    if (!dispatchRow || dispatchRow.task_id !== state.taskId) {
-      throw new ExecutionPlaneError(
-        'dispatch_mismatch',
-        `Dispatch ${input.orcaDispatchRef} does not belong to shadow task ${state.taskId}.`
-      )
-    }
+    const state = this.requirePair(input.orcaRunRef, input.orcaDispatchRef)
 
     const worklikeOutcome: 'succeeded' | 'failed' =
       input.result.cancelled || input.result.exitCode === null
@@ -197,11 +158,7 @@ export class OrcaExecutionPlane implements ExecutionPlane {
       )
     }
     const candidateHead = git(['rev-parse', 'HEAD'], state.worktreeDir)
-
-    return {
-      candidateHead,
-      outcome: mapShadowOutcome(input.result)
-    }
+    return { candidateHead, outcome: mapShadowOutcome(input.result) }
   }
 
   async abandonShadow(input: {
@@ -209,7 +166,9 @@ export class OrcaExecutionPlane implements ExecutionPlane {
     orcaDispatchRef: OrcaDispatchRef
     reason: string
   }): Promise<void> {
-    const state = this.runs.get(String(input.orcaDispatchRef))
+    const state =
+      this.cache.get(String(input.orcaDispatchRef)) ??
+      this.hydrateFromDb(String(input.orcaDispatchRef))
     if (!state) {
       return
     }
@@ -221,35 +180,87 @@ export class OrcaExecutionPlane implements ExecutionPlane {
         result: JSON.stringify({ provenance: 'orca_s1_shadow_abandon', reason: input.reason })
       })
     } catch {
-      // Advisory-only teardown: a shadow abandon that itself fails is not
-      // allowed to escape — the authoritative side is untouched regardless.
+      // advisory-only teardown — a failure here never reaches the authoritative side
     }
-    this.runs.delete(String(input.orcaDispatchRef))
+    this.cache.delete(String(input.orcaDispatchRef))
   }
 
-  private requireRun(dispatchRef: OrcaDispatchRef): ShadowRunState {
-    const state = this.runs.get(String(dispatchRef))
-    if (!state) {
+  findShadowRunByCorrelation(correlationId: CorrelationId):
+    | {
+        orcaRunRef: OrcaRunRef
+        orcaDispatchRef: OrcaDispatchRef
+        orgTaskRef: OrgTaskRef
+        settled: boolean
+      }
+    | undefined {
+    const task = this.orchestration
+      .listTasks()
+      .find((t: TaskRow) => parseCorrelation(t.spec) === String(correlationId))
+    if (!task) {
+      return undefined
+    }
+    const dispatch = this.orchestration.getDispatchContext(task.id)
+    if (!dispatch) {
+      return undefined
+    }
+    const settled =
+      dispatch.status === 'completed' ||
+      dispatch.status === 'failed' ||
+      dispatch.status === 'circuit_broken'
+    return {
+      orcaRunRef: makeOrcaRunRef(task.run_id),
+      orcaDispatchRef: makeOrcaDispatchRef(dispatch.id),
+      orgTaskRef: makeOrgTaskRef(task.id),
+      settled
+    }
+  }
+
+  private requirePair(runRef: OrcaRunRef, dispatchRef: OrcaDispatchRef): ShadowRunState {
+    const dispatchRow = this.orchestration.getDispatchContextById(String(dispatchRef))
+    if (!dispatchRow) {
       throw new ExecutionPlaneError('dispatch_mismatch', `Unknown shadow Dispatch ${dispatchRef}.`)
     }
-    return state
+    // Blocker B3 — a valid Dispatch that belongs to a DIFFERENT run is rejected.
+    if (dispatchRow.run_id !== String(runRef)) {
+      throw new ExecutionPlaneError(
+        'run_dispatch_pair_mismatch',
+        `Dispatch ${dispatchRef} belongs to run ${dispatchRow.run_id}, not ${runRef}.`
+      )
+    }
+    return (
+      this.cache.get(String(dispatchRef)) ??
+      this.hydrateFromDb(String(dispatchRef)) ??
+      (() => {
+        throw new ExecutionPlaneError(
+          'dispatch_mismatch',
+          `No shadow worktree state for Dispatch ${dispatchRef}.`
+        )
+      })()
+    )
+  }
+
+  private hydrateFromDb(dispatchId: string): ShadowRunState | undefined {
+    const dispatchRow = this.orchestration.getDispatchContextById(dispatchId)
+    if (!dispatchRow) {
+      return undefined
+    }
+    const task = this.orchestration.getTask(dispatchRow.task_id)
+    if (!task) {
+      return undefined
+    }
+    // Worktree dir / baseCommit are within-call state; a reconciler only needs
+    // to know the run exists and settle/abandon it — it never re-executes.
+    return { taskId: task.id, runId: task.run_id, worktreeDir: '', baseCommit: '' }
   }
 }
 
 function mapShadowOutcome(result: ShadowExecutionResult): ExecutionOutcome {
-  if (result.cancelled) {
-    return {
-      terminalOutcome: 'cancelled',
-      exitDisposition: 'no_exit',
-      cancellationBehavior: result.cancelledMidFlight ? 'cancelled_mid_flight' : 'cancelled_clean',
-      filesChanged: filesChangedSet(result.filesChanged)
-    }
-  }
-  const zero = result.exitCode === 0
-  return {
-    terminalOutcome: zero ? 'completed' : 'failed',
-    exitDisposition: result.exitCode === null ? 'no_exit' : zero ? 'zero_exit' : 'non_zero_exit',
-    cancellationBehavior: 'not_cancelled',
-    filesChanged: filesChangedSet(result.filesChanged)
-  }
+  return toExecutionOutcome({
+    baseCommit: '',
+    headCommit: '',
+    exitCode: result.exitCode,
+    cancelled: result.cancelled,
+    cancelledMidFlight: result.cancelledMidFlight,
+    filesChanged: result.filesChanged
+  })
 }

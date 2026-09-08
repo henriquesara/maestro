@@ -1,64 +1,87 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { SqliteExecutionStore } from './sqlite-execution-store'
-import { migrateExecutionStore } from './execution-schema'
-import { makeOrcaDispatchRef, RunBindingError } from '../domain/execution-identity'
-import { fixtureBinding } from '../slices/shadow-identity-observation/shadow-observation.test-support'
+import {
+  makeAiControlRunRef,
+  makeCorrelationId,
+  makeOrcaDispatchRef,
+  RunBindingError
+} from '../domain/execution-identity'
+import {
+  fixtureBinding,
+  openExecStores
+} from '../slices/shadow-identity-observation/shadow-observation.test-support'
 
-// I3 — run_binding uniqueness: one Dispatch → at most one AgentRun; aicontrol_run_id unique when present.
-describe('SqliteExecutionStore binding uniqueness (amendment §L)', () => {
-  let store: SqliteExecutionStore | undefined
-
+// I3 — run_binding uniqueness. correlation_id is also unique (amendment 001 §5).
+describe('SqliteExecutionStore binding uniqueness', () => {
+  let ctx: ReturnType<typeof openExecStores> | undefined
   afterEach(() => {
-    store?.close()
-    store = undefined
+    ctx?.close()
+    ctx = undefined
   })
 
-  function open(): SqliteExecutionStore {
-    const s = new SqliteExecutionStore(':memory:')
-    migrateExecutionStore(s.database)
-    return s
-  }
-
   it('rejects a second binding for the same orca_dispatch_id', () => {
-    store = open()
-    store.recordBinding(fixtureBinding())
+    ctx = openExecStores()
+    // a reservation row is required (FK from run_binding.correlation_id)
+    ctx.reservations.reserve({
+      correlationId: makeCorrelationId('corr_1'),
+      sliceRef: 'ORCA-S1',
+      authoritativeRunRef: null,
+      workloadId: 'w1',
+      now: 'now'
+    })
+    ctx.store.recordBinding(fixtureBinding())
     let thrown: unknown
     try {
-      store.recordBinding(fixtureBinding({ aicontrolRunId: null }))
-    } catch (error) {
-      thrown = error
+      ctx.store.recordBinding(fixtureBinding())
+    } catch (e) {
+      thrown = e
     }
     expect(thrown).toBeInstanceOf(RunBindingError)
     expect((thrown as RunBindingError).code).toBe('duplicate_dispatch')
   })
 
   it('rejects a second binding for the same non-null aicontrol_run_id', () => {
-    store = open()
-    store.recordBinding(fixtureBinding())
+    ctx = openExecStores()
+    for (const [cid, wid] of [
+      ['corr_1', 'w1'],
+      ['corr_2', 'w2']
+    ] as const) {
+      ctx.reservations.reserve({
+        correlationId: makeCorrelationId(cid),
+        sliceRef: 'ORCA-S1',
+        authoritativeRunRef: null,
+        workloadId: wid,
+        now: 'now'
+      })
+    }
+    ctx.store.recordBinding(fixtureBinding({ aicontrolRunId: makeAiControlRunRef('run_x') }))
     let thrown: unknown
     try {
-      store.recordBinding(fixtureBinding({ orcaDispatchId: makeOrcaDispatchRef('ctx_2') }))
-    } catch (error) {
-      thrown = error
+      ctx.store.recordBinding(
+        fixtureBinding({
+          correlationId: makeCorrelationId('corr_2'),
+          orcaDispatchId: makeOrcaDispatchRef('ctx_2'),
+          aicontrolRunId: makeAiControlRunRef('run_x')
+        })
+      )
+    } catch (e) {
+      thrown = e
     }
     expect(thrown).toBeInstanceOf(RunBindingError)
     expect((thrown as RunBindingError).code).toBe('duplicate_aicontrol_run')
   })
 
-  it('allows two bindings that both have a null aicontrol_run_id', () => {
-    store = open()
-    store.recordBinding(fixtureBinding({ aicontrolRunId: null }))
-    expect(() =>
-      store!.recordBinding(
-        fixtureBinding({ aicontrolRunId: null, orcaDispatchId: makeOrcaDispatchRef('ctx_2') })
-      )
-    ).not.toThrow()
-  })
-
-  it('round-trips a binding by dispatch id', () => {
-    store = open()
+  it('round-trips a binding by dispatch id and by correlation id', () => {
+    ctx = openExecStores()
+    ctx.reservations.reserve({
+      correlationId: makeCorrelationId('corr_1'),
+      sliceRef: 'ORCA-S1',
+      authoritativeRunRef: null,
+      workloadId: 'w1',
+      now: 'now'
+    })
     const b = fixtureBinding()
-    store.recordBinding(b)
-    expect(store.getBindingByDispatch(String(b.orcaDispatchId))?.orgTaskId).toBe(b.orgTaskId)
+    ctx.store.recordBinding(b)
+    expect(ctx.store.getBindingByDispatch(String(b.orcaDispatchId))?.orgTaskId).toBe(b.orgTaskId)
+    expect(ctx.store.getBindingByCorrelation(String(b.correlationId))?.orgTaskId).toBe(b.orgTaskId)
   })
 })

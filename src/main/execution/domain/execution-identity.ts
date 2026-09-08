@@ -42,9 +42,15 @@ export class RunBindingError extends Error {
   }
 }
 
+/** Execution-minted, durable on BOTH sides (amendment 001 §5): in the Execution
+ *  `run_reservation` row and in the shadow Orca task `spec` JSON marker. */
+export type CorrelationId = Branded<'orca_s1_correlation'>
+export const makeCorrelationId = (raw: string): CorrelationId => brand(raw, 'orca_s1_correlation')
+
 // The durable identity map (amendment §L: durable, unambiguous, idempotent,
 // persisted by the owning module — never reconstructed heuristically).
 export type RunBinding = {
+  correlationId: CorrelationId
   governanceAgentRunId: GovernanceAgentRunRef
   aicontrolRunId: AiControlRunRef | null
   orcaRunId: OrcaRunRef

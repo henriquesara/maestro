@@ -1,80 +1,104 @@
 import { describe, expect, it } from 'vitest'
 import { classifyShadowWorkload, type WorkloadDescriptor } from './shadow-safety-policy'
 
-// I2 — an unsafe workload must be rejected by SHADOW_EXECUTION_SAFETY_POLICY.
-describe('SHADOW_EXECUTION_SAFETY_POLICY (amendment §I)', () => {
-  it('rejects a workload that can call a mutating external API', () => {
-    const d: WorkloadDescriptor = {
-      id: 'w1',
-      kind: 'external_effect',
+// Blocker B5 — a caller-supplied string is not independent acceptance; actor
+// separation is required for any side-effecting workload.
+describe('SHADOW_EXECUTION_SAFETY_POLICY hardened (amendment 001 §6)', () => {
+  it('auto-admits a synthetic workload with no declared capability', () => {
+    expect(
+      classifyShadowWorkload({ id: 'w', kind: 'synthetic', declaredCapabilities: [] }).eligible
+    ).toBe(true)
+  })
+
+  it('auto-admits a repo_local_code_only workload with no declared capability', () => {
+    expect(
+      classifyShadowWorkload({ id: 'w', kind: 'repo_local_code_only', declaredCapabilities: [] })
+        .eligible
+    ).toBe(true)
+  })
+
+  it('rejects external_effect with no isolation decision', () => {
+    const d = classifyShadowWorkload({ id: 'w', kind: 'external_effect', declaredCapabilities: [] })
+    expect(d.eligible).toBe(false)
+  })
+
+  it('rejects a declared prohibited capability with no isolation decision', () => {
+    const d = classifyShadowWorkload({
+      id: 'w',
+      kind: 'synthetic',
       declaredCapabilities: ['mutating_external_api']
+    })
+    expect(d.eligible).toBe(false)
+    if (!d.eligible) {
+      expect(d.code).toBe('prohibited_capability')
+    }
+  })
+
+  it('rejects acceptedBy "self" — not independent acceptance', () => {
+    const d: WorkloadDescriptor = {
+      id: 'w',
+      kind: 'external_effect',
+      declaredCapabilities: ['deploy'],
+      isolationDecision: {
+        kind: 'dry_run',
+        decisionRef: 'DEC-1',
+        authoredBy: 'self',
+        acceptedBy: 'self',
+        note: 'n'
+      }
     }
     const decision = classifyShadowWorkload(d)
     expect(decision.eligible).toBe(false)
     if (!decision.eligible) {
-      expect(decision.code).toBe('prohibited_capability')
+      expect(decision.code).toBe('isolation_actor_not_separated')
     }
   })
 
-  it('rejects a repo_local_code_only workload that still declares a network mutation', () => {
-    const decision = classifyShadowWorkload({
-      id: 'w2',
-      kind: 'repo_local_code_only',
-      declaredCapabilities: ['network_mutation']
-    })
-    expect(decision.eligible).toBe(false)
-  })
-
-  it('rejects external_effect without an accepted isolation strategy', () => {
-    const decision = classifyShadowWorkload({
-      id: 'w3',
+  it('rejects when authoredBy === acceptedBy (no actor separation)', () => {
+    const d = classifyShadowWorkload({
+      id: 'w',
       kind: 'external_effect',
-      declaredCapabilities: []
+      declaredCapabilities: [],
+      isolationDecision: {
+        kind: 'mocked_endpoint',
+        decisionRef: 'DEC-2',
+        authoredBy: 'alice',
+        acceptedBy: 'alice',
+        note: 'n'
+      }
     })
-    expect(decision.eligible).toBe(false)
-    if (!decision.eligible) {
-      expect(decision.code).toBe('external_effect_without_isolation')
-    }
+    expect(d.eligible).toBe(false)
   })
 
-  it('rejects external_effect whose isolation strategy has no independent acceptance', () => {
-    const decision = classifyShadowWorkload({
-      id: 'w4',
+  it('rejects when decisionRef is empty', () => {
+    const d = classifyShadowWorkload({
+      id: 'w',
       kind: 'external_effect',
-      declaredCapabilities: ['deploy'],
-      isolationStrategy: { kind: 'dry_run', acceptedBy: '', note: 'planned' }
+      declaredCapabilities: [],
+      isolationDecision: {
+        kind: 'mocked_endpoint',
+        decisionRef: '',
+        authoredBy: 'alice',
+        acceptedBy: 'bob',
+        note: 'n'
+      }
     })
-    expect(decision.eligible).toBe(false)
-    if (!decision.eligible) {
-      expect(decision.code).toBe('isolation_not_accepted')
-    }
+    expect(d.eligible).toBe(false)
   })
 
-  it('accepts a synthetic workload with no declared capabilities', () => {
-    const decision = classifyShadowWorkload({
-      id: 'w5',
-      kind: 'synthetic',
-      declaredCapabilities: []
-    })
-    expect(decision.eligible).toBe(true)
-  })
-
-  it('accepts a repo_local_code_only workload with no declared capabilities', () => {
-    const decision = classifyShadowWorkload({
-      id: 'w6',
-      kind: 'repo_local_code_only',
-      declaredCapabilities: []
-    })
-    expect(decision.eligible).toBe(true)
-  })
-
-  it('accepts an external_effect workload with an accepted isolation strategy', () => {
-    const decision = classifyShadowWorkload({
-      id: 'w7',
+  it('admits an external_effect workload only with an actor-separated durable decision', () => {
+    const d = classifyShadowWorkload({
+      id: 'w',
       kind: 'external_effect',
       declaredCapabilities: ['send_message'],
-      isolationStrategy: { kind: 'mocked_endpoint', acceptedBy: 'reviewer-x', note: 'mock only' }
+      isolationDecision: {
+        kind: 'mocked_endpoint',
+        decisionRef: 'DEC-3',
+        authoredBy: 'alice',
+        acceptedBy: 'bob',
+        note: 'mock only'
+      }
     })
-    expect(decision.eligible).toBe(true)
+    expect(d.eligible).toBe(true)
   })
 })

@@ -1,30 +1,41 @@
-// Execution bounded context — application. Orchestrates ORCA-S1: resolve the
-// frozen sample, classify each workload, dispatch only the eligible subset via
-// the ExecutionPlane, record run_binding + parity_observation, root-cause every
-// divergence. Advisory only — never touches an authoritative run.
+// Execution bounded context — application. Orchestrates ORCA-S1 with a
+// crash-safe durable reservation lifecycle (amendment 001 §5), same-workload
+// parity (§3), mechanical confinement (§6), and structured root-cause
+// adjudication (§7). Advisory only — never touches an authoritative run.
 
-import type { AuthoritativeRunSource, SampleRequest } from './authoritative-run-source'
+import type { AuthoritativeExecutor } from './authoritative-executor'
 import type { ExecutionPlane } from './execution-plane'
 import type { ExecutionStore } from './execution-store'
+import { reconcileIncompleteReservations } from './reconcile-incomplete-reservations'
+import type { ReservationStore } from './reservation-store'
 import {
   makeAiControlRunRef,
+  makeCorrelationId,
   makeGovernanceAgentRunRef,
   type RunBinding
 } from '../domain/execution-identity'
 import {
   assertObservationComplete,
   compareOutcomes,
-  type ExecutionOutcome,
   type ParityObservation,
-  type ParityResult
+  type RootCauseAdjudication
 } from '../domain/parity'
-import { classifyShadowWorkload } from '../domain/shadow-safety-policy'
+import { assertWorkloadConfined, PathConfinementError } from '../domain/path-confinement'
+import { classifyShadowWorkload, type WorkloadDescriptor } from '../domain/shadow-safety-policy'
+import type { WorkloadSpec } from '../domain/workload-spec'
+
+export type ShadowSampleSlot = {
+  profile: string
+  authoritativeRunRef: string | null
+  descriptor: WorkloadDescriptor
+  workload: WorkloadSpec
+}
 
 export type ShadowObservationInput = {
   sliceRef: string
-  request: SampleRequest
-  worktreeRoot: string
-  makeWorktreeDir: (runId: string) => string
+  slots: readonly ShadowSampleSlot[]
+  shadowRoot: string
+  worktreeDirFor: (kind: 'auth' | 'shadow', correlationId: string) => string
   now: () => string
   newId: (prefix: string) => string
 }
@@ -34,14 +45,16 @@ export type ShadowObservationReport = {
   bindings: readonly RunBinding[]
   observations: readonly ParityObservation[]
   exclusionCount: number
-  divergences: readonly { dispatchId: string; dimension: string; rootCause: string }[]
+  divergences: readonly { dispatchId: string; dimension: string; adjudicationStatus: string }[]
   abandoned: readonly { workloadId: string; reason: string }[]
+  reconcile: { scanned: number; abandoned: number }
 }
 
 export type ShadowObservationDeps = {
-  source: AuthoritativeRunSource
+  authoritativeExecutor: AuthoritativeExecutor
   plane: ExecutionPlane
   store: ExecutionStore
+  reservations: ReservationStore
 }
 
 function sanitize(error: unknown): string {
@@ -50,91 +63,89 @@ function sanitize(error: unknown): string {
 }
 
 /**
- * Deterministic root-cause for the frozen ORCA-S1 sample. Every divergence gets
- * a non-empty cause (I7 / §S gate 8); the report keeps the dimension list so an
- * *unexpected* divergence is still visible to independent acceptance.
+ * Structured adjudication (blocker B9). Each divergence dimension is either
+ * genuinely `explained` with concrete evidence, or `unresolved` — which makes
+ * `assertObservationComplete` throw and fails the acceptance gate.
  */
-export function rootCauseFor(
-  parity: ParityResult,
-  authoritative: ExecutionOutcome,
-  shadow: ExecutionOutcome
-): string {
-  const dims = parity.divergences.map((d) => d.dimension)
-  const causes: string[] = []
-  if (dims.includes('files_changed') && authoritative.filesChanged !== null) {
-    // A recorded files-changed set differs from the synthetic shadow set — the
-    // shadow runs an approximation, not the real agent turn.
-    causes.push('shadow_synthetic_workload_not_replayable')
-  }
-  if (
-    dims.includes('cancellation') &&
-    shadow.cancellationBehavior === 'cancelled_mid_flight' &&
-    authoritative.cancellationBehavior === 'cancelled_clean'
-  ) {
-    causes.push('authoritative_cancellation_granularity_not_recorded')
-  }
-  if (dims.includes('terminal_outcome')) {
-    causes.push('shadow_synthetic_workload_terminal_outcome_mismatch')
-  }
-  if (dims.includes('exit_disposition') && !dims.includes('terminal_outcome')) {
-    causes.push('shadow_synthetic_exit_disposition_mismatch')
-  }
-  const covered = new Set<string>()
-  if (causes.includes('shadow_synthetic_workload_not_replayable')) {
-    covered.add('files_changed')
-  }
-  if (causes.includes('authoritative_cancellation_granularity_not_recorded')) {
-    covered.add('cancellation')
-  }
-  if (causes.includes('shadow_synthetic_workload_terminal_outcome_mismatch')) {
-    covered.add('terminal_outcome')
-    covered.add('exit_disposition')
-  }
-  if (causes.includes('shadow_synthetic_exit_disposition_mismatch')) {
-    covered.add('exit_disposition')
-  }
-  const uncovered = dims.filter((d) => !covered.has(d))
-  if (uncovered.length > 0) {
-    causes.push(`unexpected_divergence:${uncovered.join('+')}`)
-  }
-  return causes.join('; ')
+export function adjudicate(
+  parity: ReturnType<typeof compareOutcomes>,
+  spec: WorkloadSpec,
+  authoritative: { cancellationBehavior: string },
+  shadow: { cancellationBehavior: string; filesChanged: readonly string[] | null }
+): RootCauseAdjudication[] {
+  return parity.divergences.map((divergence): RootCauseAdjudication => {
+    const observedMismatch = `${divergence.dimension}: authoritative=${divergence.authoritative} shadow=${divergence.shadow}`
+
+    if (divergence.dimension === 'files_changed' && (spec.shadowInputExtras?.length ?? 0) > 0) {
+      return {
+        status: 'explained',
+        dimension: 'files_changed',
+        observedMismatch,
+        classifiedCause: 'shadow_input_worktree_divergence',
+        evidence: [
+          `shadow input worktree carried extra untracked content: ${spec
+            .shadowInputExtras!.map((f) => f.path)
+            .join(', ')}`,
+          `shadow files_changed = [${(shadow.filesChanged ?? []).join(', ')}]`
+        ]
+      }
+    }
+
+    if (
+      divergence.dimension === 'cancellation' &&
+      spec.steps.some((s) => s.op === 'cancel' && s.midFlight) &&
+      authoritative.cancellationBehavior === 'cancelled_clean' &&
+      shadow.cancellationBehavior === 'cancelled_mid_flight'
+    ) {
+      return {
+        status: 'explained',
+        dimension: 'cancellation',
+        observedMismatch,
+        classifiedCause: 'reference_executor_cancellation_granularity_coarse',
+        evidence: [
+          'aiControl-native recording coarsens mid-flight cancellation to clean (amendment 001 §4 row 6)',
+          `authoritative=${authoritative.cancellationBehavior} shadow=${shadow.cancellationBehavior}`
+        ]
+      }
+    }
+
+    return {
+      status: 'unresolved',
+      dimension: divergence.dimension,
+      observedMismatch,
+      classifiedCause: null,
+      evidence: [observedMismatch]
+    }
+  })
 }
 
 export async function runShadowObservation(
   deps: ShadowObservationDeps,
   input: ShadowObservationInput
 ): Promise<ShadowObservationReport> {
-  const { source, plane, store } = deps
+  const { authoritativeExecutor, plane, store, reservations } = deps
+
+  // B2 — reconcile any incomplete reservation from a prior crash, first and idempotently.
+  const reconcile = reconcileIncompleteReservations(
+    { plane, store, reservations },
+    { sliceRef: input.sliceRef, now: input.now() }
+  )
+
   const bindings: RunBinding[] = []
   const observations: ParityObservation[] = []
-  const divergences: { dispatchId: string; dimension: string; rootCause: string }[] = []
+  const divergences: { dispatchId: string; dimension: string; adjudicationStatus: string }[] = []
   const abandoned: { workloadId: string; reason: string }[] = []
   let exclusionCount = 0
 
-  const entries = source.resolveSample(input.request)
+  for (const slot of input.slots) {
+    const spec = slot.workload
 
-  for (const entry of entries) {
-    if (entry.kind === 'unavailable') {
-      store.recordExclusion({
-        id: input.newId('excl'),
-        sliceRef: input.sliceRef,
-        workloadId: `slot:${entry.profile}`,
-        code: 'sample_source_unavailable',
-        reason: `no authoritative row for profile ${entry.profile}`,
-        excludedAt: input.now()
-      })
-      exclusionCount += 1
-      continue
-    }
-
-    const { record } = entry
-    const decision = classifyShadowWorkload(record.descriptor)
+    const decision = classifyShadowWorkload(slot.descriptor)
     if (!decision.eligible) {
-      // I2 — an ineligible workload is refused before any ExecutionPlane call.
       store.recordExclusion({
         id: input.newId('excl'),
         sliceRef: input.sliceRef,
-        workloadId: record.descriptor.id,
+        workloadId: slot.descriptor.id,
         code: decision.code,
         reason: decision.reason,
         excludedAt: input.now()
@@ -143,68 +154,145 @@ export async function runShadowObservation(
       continue
     }
 
-    // I5 — the whole per-entry run is contained: no throw escapes this block.
+    // B2 idempotency — a prior reservation for this (authoritative row, workload)
+    // is reused/short-circuited, never re-dispatched.
+    const prior = reservations.findByAuthoritativeWorkload(
+      input.sliceRef,
+      slot.authoritativeRunRef,
+      spec.id
+    )
+    if (prior && prior.state === 'observed') {
+      continue
+    }
+    if (prior && prior.state !== 'abandoned') {
+      reservations.advance(prior.correlationId, 'abandoned', {
+        lastError: 'still incomplete after reconcile',
+        now: input.now()
+      })
+      abandoned.push({ workloadId: spec.id, reason: 'still incomplete after reconcile' })
+      continue
+    }
+
+    const correlationId = makeCorrelationId(input.newId('corr'))
+    const authWorktree = input.worktreeDirFor('auth', String(correlationId))
+    const shadowWorktree = input.worktreeDirFor('shadow', String(correlationId))
+
+    // B5 — mechanical confinement of every file effect, before any execution.
+    try {
+      assertWorkloadConfined(spec, authWorktree, input.shadowRoot)
+      assertWorkloadConfined(spec, shadowWorktree, input.shadowRoot)
+    } catch (error) {
+      if (error instanceof PathConfinementError) {
+        store.recordExclusion({
+          id: input.newId('excl'),
+          sliceRef: input.sliceRef,
+          workloadId: spec.id,
+          code: 'path_confinement',
+          reason: `${error.code}: ${error.message}`,
+          excludedAt: input.now()
+        })
+        exclusionCount += 1
+        continue
+      }
+      throw error
+    }
+
+    reservations.reserve({
+      correlationId,
+      sliceRef: input.sliceRef,
+      authoritativeRunRef: slot.authoritativeRunRef,
+      workloadId: spec.id,
+      now: input.now()
+    })
+
     let opened: Awaited<ReturnType<ExecutionPlane['openShadowRun']>> | undefined
     try {
-      const governanceAgentRunId = makeGovernanceAgentRunRef(input.newId('gar'))
+      const auth = await authoritativeExecutor.execute({ spec, worktreeDir: authWorktree })
+
       opened = await plane.openShadowRun({
         sliceRef: input.sliceRef,
-        workloadId: record.workload.id,
-        baseCommit: 'shadow-base',
-        governanceAgentRunId
+        workloadId: spec.id,
+        correlationId,
+        governanceAgentRunId: makeGovernanceAgentRunRef(input.newId('gar')),
+        worktreeDir: shadowWorktree,
+        seededFiles: spec.seededFiles ?? [],
+        postBaseFiles: spec.shadowInputExtras ?? []
       })
-
-      const runResult = await plane.runShadowWorkload({
-        orcaDispatchRef: opened.orcaDispatchRef,
-        workload: record.workload,
-        worktreeDir: input.makeWorktreeDir(String(opened.orcaDispatchRef))
-      })
-      const settled = await plane.settleShadow({
-        orcaRunRef: opened.orcaRunRef,
-        orcaDispatchRef: opened.orcaDispatchRef,
-        result: runResult
+      reservations.advance(correlationId, 'orca_created', {
+        orcaRunId: String(opened.orcaRunRef),
+        orcaDispatchId: String(opened.orcaDispatchRef),
+        orgTaskId: String(opened.orgTaskRef),
+        now: input.now()
       })
 
       const binding: RunBinding = {
-        governanceAgentRunId,
-        aicontrolRunId: makeAiControlRunRef(record.aicontrolRunId),
+        correlationId,
+        governanceAgentRunId: makeGovernanceAgentRunRef(input.newId('gar')),
+        aicontrolRunId:
+          slot.authoritativeRunRef === null ? null : makeAiControlRunRef(slot.authoritativeRunRef),
         orcaRunId: opened.orcaRunRef,
         orcaDispatchId: opened.orcaDispatchRef,
         orgTaskId: opened.orgTaskRef,
         sliceRef: input.sliceRef,
-        baseCommit: 'shadow-base',
-        candidateHead: settled.candidateHead,
+        baseCommit: opened.baseCommit,
+        candidateHead: null,
         boundAt: input.now()
       }
-      store.recordBinding(binding) // I3 — uniqueness enforced here
+      store.recordBinding(binding) // I3
+      reservations.advance(correlationId, 'bound', { now: input.now() })
       bindings.push(binding)
 
-      const parity = compareOutcomes(record.recordedOutcome, settled.outcome)
-      const rootCause = parity.match
-        ? null
-        : rootCauseFor(parity, record.recordedOutcome, settled.outcome)
+      const shadowResult = await plane.runShadowWorkload({
+        orcaRunRef: opened.orcaRunRef,
+        orcaDispatchRef: opened.orcaDispatchRef,
+        workload: spec
+      })
+      reservations.advance(correlationId, 'executed', { now: input.now() })
+
+      const settled = await plane.settleShadow({
+        orcaRunRef: opened.orcaRunRef,
+        orcaDispatchRef: opened.orcaDispatchRef,
+        result: shadowResult
+      })
+      store.setBindingCandidateHead(String(opened.orcaDispatchRef), settled.candidateHead)
+      binding.candidateHead = settled.candidateHead // keep the in-memory report row in step with the row
+      reservations.advance(correlationId, 'settled', {
+        candidateHead: settled.candidateHead,
+        now: input.now()
+      })
+
+      const parity = compareOutcomes(auth.outcome, settled.outcome)
+      const adjudications = adjudicate(parity, spec, auth.outcome, settled.outcome)
       const observation: ParityObservation = {
         id: input.newId('parity'),
         runBindingDispatchId: String(opened.orcaDispatchRef),
         sliceRef: input.sliceRef,
-        authoritative: record.recordedOutcome,
+        workloadId: spec.id,
+        authoritative: auth.outcome,
         shadow: settled.outcome,
         parity,
-        rootCause,
+        adjudications,
         observedAt: input.now()
       }
-      assertObservationComplete(observation) // I7
+      assertObservationComplete(observation) // I7 / B9 — throws on unresolved / unexplained
       store.recordParityObservation(observation)
+      reservations.advance(correlationId, 'observed', { now: input.now() })
       observations.push(observation)
-      for (const d of parity.divergences) {
+
+      for (const divergence of parity.divergences) {
+        const adj = adjudications.find((a) => a.dimension === divergence.dimension)
         divergences.push({
           dispatchId: String(opened.orcaDispatchRef),
-          dimension: d.dimension,
-          rootCause: rootCause ?? ''
+          dimension: divergence.dimension,
+          adjudicationStatus: adj?.status ?? 'missing'
         })
       }
     } catch (error) {
-      abandoned.push({ workloadId: record.workload.id, reason: sanitize(error) })
+      abandoned.push({ workloadId: spec.id, reason: sanitize(error) })
+      reservations.advance(correlationId, 'abandoned', {
+        lastError: sanitize(error),
+        now: input.now()
+      })
       if (opened) {
         try {
           await plane.abandonShadow({
@@ -225,6 +313,7 @@ export async function runShadowObservation(
     observations,
     exclusionCount,
     divergences,
-    abandoned
+    abandoned,
+    reconcile: { scanned: reconcile.scanned, abandoned: reconcile.abandoned.length }
   }
 }

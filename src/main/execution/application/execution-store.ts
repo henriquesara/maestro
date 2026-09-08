@@ -10,7 +10,7 @@ export type WorkloadExclusion = {
   id: string
   sliceRef: string
   workloadId: string
-  code: SafetyRejectionCode | 'sample_source_unavailable'
+  code: SafetyRejectionCode | 'sample_source_unavailable' | 'path_confinement'
   reason: string
   excludedAt: string
 }
@@ -18,7 +18,9 @@ export type WorkloadExclusion = {
 export type ExecutionStore = {
   /** Throws RunBindingError('duplicate_dispatch'|'duplicate_aicontrol_run') on a uniqueness violation. */
   recordBinding(binding: RunBinding): void
+  setBindingCandidateHead(orcaDispatchId: string, candidateHead: string): void
   getBindingByDispatch(orcaDispatchId: string): RunBinding | undefined
+  getBindingByCorrelation(correlationId: string): RunBinding | undefined
   listBindings(sliceRef: string): RunBinding[]
 
   recordParityObservation(observation: ParityObservation): void

@@ -101,14 +101,36 @@ export function compareOutcomes(
   return { match: divergences.length === 0, divergences, notComparable }
 }
 
+/**
+ * Structured root-cause adjudication (amendment 001 §7, blocker B9). A bare
+ * label is not sufficient — a divergence is either genuinely `explained` with
+ * concrete evidence, or it stays `unresolved` and fails the acceptance gate.
+ */
+export type RootCauseAdjudication =
+  | {
+      status: 'explained'
+      dimension: ParityDimension
+      observedMismatch: string
+      classifiedCause: string
+      evidence: readonly string[]
+    }
+  | {
+      status: 'unresolved'
+      dimension: ParityDimension
+      observedMismatch: string
+      classifiedCause: null
+      evidence: readonly string[]
+    }
+
 export type ParityObservation = {
   id: string
   runBindingDispatchId: string
   sliceRef: string
+  workloadId: string
   authoritative: ExecutionOutcome
   shadow: ExecutionOutcome
   parity: ParityResult
-  rootCause: string | null
+  adjudications: readonly RootCauseAdjudication[]
   observedAt: string
 }
 
@@ -120,14 +142,31 @@ export class ParityObservationError extends Error {
 }
 
 /**
- * I7 — an observation with a mismatch is incomplete until every divergence is
- * root-caused.
+ * I7 (blocker B9) — an observation with a mismatch is complete only when every
+ * divergence dimension has a matching `explained` adjudication with non-empty
+ * evidence. An `unresolved` adjudication is a failure, never an acceptance.
  */
 export function assertObservationComplete(observation: ParityObservation): void {
-  if (!observation.parity.match && (observation.rootCause ?? '').trim().length === 0) {
+  const unresolved = observation.adjudications.filter((a) => a.status === 'unresolved')
+  if (unresolved.length > 0) {
     throw new ParityObservationError(
-      `ParityObservation ${observation.id} has ${observation.parity.divergences.length} divergence(s) and no root cause.`
+      `ParityObservation ${observation.id} (${observation.workloadId}) has unresolved divergence(s): ${unresolved
+        .map((a) => a.dimension)
+        .join(', ')}`
     )
+  }
+  if (observation.parity.match) {
+    return
+  }
+  for (const divergence of observation.parity.divergences) {
+    const adj = observation.adjudications.find(
+      (a) => a.dimension === divergence.dimension && a.status === 'explained'
+    )
+    if (!adj || adj.evidence.length === 0) {
+      throw new ParityObservationError(
+        `ParityObservation ${observation.id} (${observation.workloadId}) divergence on ${divergence.dimension} is not explained with evidence.`
+      )
+    }
   }
 }
 

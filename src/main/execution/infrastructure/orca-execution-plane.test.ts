@@ -1,60 +1,59 @@
-import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { OrchestrationDb } from '../../runtime/orchestration/db'
 import { OrcaExecutionPlane } from './orca-execution-plane'
+import { DisposableShadowRoot } from './disposable-shadow-root'
 import { ExecutionPlaneError } from '../application/execution-plane'
-import { makeGovernanceAgentRunRef, makeOrcaDispatchRef } from '../domain/execution-identity'
+import { makeCorrelationId, makeGovernanceAgentRunRef } from '../domain/execution-identity'
 import {
-  COORD_PANE_KEY,
-  makeTmpDir,
-  syntheticWorkload
+  SHADOW_COORD_PANE_KEY,
+  workloadSpec
 } from '../slices/shadow-identity-observation/shadow-observation.test-support'
 
 // Integration: the real Orca adapter over a real (in-memory) OrchestrationDb and
-// real disposable git worktrees. Proves open/run/settle and I4 (wrong Dispatch).
+// a real disposable shadow root. Proves open/run/settle, B3 (run/dispatch pair),
+// and B2 (durable correlation marker on the Orca side).
 describe('OrcaExecutionPlane (shadow, advisory only)', () => {
-  const cleanups: (() => void)[] = []
   let orch: OrchestrationDb | undefined
+  let root: DisposableShadowRoot | undefined
 
   afterEach(() => {
     orch?.close()
     orch = undefined
-    while (cleanups.length) {
-      cleanups.pop()?.()
-    }
+    root?.cleanup()
+    root = undefined
   })
 
   function makePlane() {
     orch = new OrchestrationDb(':memory:')
-    const root = makeTmpDir('orca-s1-wt-')
-    cleanups.push(root.cleanup)
-    let n = 0
-    const plane = new OrcaExecutionPlane(orch, COORD_PANE_KEY, (id) =>
-      join(root.dir, `wt_${++n}_${id}`)
-    )
-    return plane
+    root = DisposableShadowRoot.create()
+    return new OrcaExecutionPlane(orch, SHADOW_COORD_PANE_KEY)
   }
 
-  it('opens, runs a synthetic workload and settles a shadow run — reporting files changed and a real candidate HEAD', async () => {
-    const plane = makePlane()
-    const opened = await plane.openShadowRun({
+  async function open(plane: OrcaExecutionPlane, workloadId: string, correlation: string) {
+    return plane.openShadowRun({
       sliceRef: 'ORCA-S1',
-      workloadId: 'w1',
-      baseCommit: 'shadow-base',
-      governanceAgentRunId: makeGovernanceAgentRunRef('gar_1')
+      workloadId,
+      correlationId: makeCorrelationId(correlation),
+      governanceAgentRunId: makeGovernanceAgentRunRef(`gar_${workloadId}`),
+      worktreeDir: root!.worktreeDir(`shadow-${workloadId}`),
+      seededFiles: [],
+      postBaseFiles: []
     })
+  }
+
+  it('opens, runs a synthetic workload, and settles — reporting real files_changed + a real candidate HEAD', async () => {
+    const plane = makePlane()
+    const opened = await open(plane, 'w1', 'corr_1')
     const result = await plane.runShadowWorkload({
+      orcaRunRef: opened.orcaRunRef,
       orcaDispatchRef: opened.orcaDispatchRef,
-      workload: syntheticWorkload('w1', [
+      workload: workloadSpec('w1', [
         { op: 'write', path: 'src/a.txt', content: '1' },
         { op: 'write', path: 'src/b.txt', content: '2' },
         { op: 'exit', code: 0 }
-      ]),
-      worktreeDir: 'ignored-adapter-owns-it'
+      ])
     })
-    expect(result.exitCode).toBe(0)
     expect([...result.filesChanged].sort()).toEqual(['src/a.txt', 'src/b.txt'])
-
     const settled = await plane.settleShadow({
       orcaRunRef: opened.orcaRunRef,
       orcaDispatchRef: opened.orcaDispatchRef,
@@ -64,55 +63,51 @@ describe('OrcaExecutionPlane (shadow, advisory only)', () => {
     expect(settled.candidateHead).toMatch(/^[0-9a-f]{40}$/)
   })
 
-  it('maps a non-zero exit to failed / non_zero_exit', async () => {
+  it('B8: an attempted delete of a nonexistent path is NOT counted as a changed file', async () => {
     const plane = makePlane()
-    const opened = await plane.openShadowRun({
-      sliceRef: 'ORCA-S1',
-      workloadId: 'w2',
-      baseCommit: 'shadow-base',
-      governanceAgentRunId: makeGovernanceAgentRunRef('gar_2')
-    })
+    const opened = await open(plane, 'wdel', 'corr_del')
     const result = await plane.runShadowWorkload({
-      orcaDispatchRef: opened.orcaDispatchRef,
-      workload: syntheticWorkload('w2', [
-        { op: 'write', path: 'src/x.txt', content: '1' },
-        { op: 'exit', code: 2 }
-      ]),
-      worktreeDir: 'x'
-    })
-    const settled = await plane.settleShadow({
       orcaRunRef: opened.orcaRunRef,
       orcaDispatchRef: opened.orcaDispatchRef,
-      result
+      workload: workloadSpec('wdel', [
+        { op: 'write', path: 'src/real.txt', content: '1' },
+        { op: 'delete', path: 'src/does-not-exist.txt' },
+        { op: 'exit', code: 0 }
+      ])
     })
-    expect(settled.outcome.terminalOutcome).toBe('failed')
-    expect(settled.outcome.exitDisposition).toBe('non_zero_exit')
+    expect([...result.filesChanged]).toEqual(['src/real.txt'])
   })
 
-  it('I4: settling through a Dispatch ref that is not a known shadow run is rejected', async () => {
+  it('B3: settling run A with a VALID Dispatch that belongs to run B is rejected on the production path', async () => {
     const plane = makePlane()
-    const opened = await plane.openShadowRun({
-      sliceRef: 'ORCA-S1',
-      workloadId: 'w3',
-      baseCommit: 'shadow-base',
-      governanceAgentRunId: makeGovernanceAgentRunRef('gar_3')
-    })
-    const result = await plane.runShadowWorkload({
-      orcaDispatchRef: opened.orcaDispatchRef,
-      workload: syntheticWorkload('w3', [{ op: 'exit', code: 0 }]),
-      worktreeDir: 'x'
+    const a = await open(plane, 'wA', 'corr_A')
+    const b = await open(plane, 'wB', 'corr_B')
+    await plane.runShadowWorkload({
+      orcaRunRef: a.orcaRunRef,
+      orcaDispatchRef: a.orcaDispatchRef,
+      workload: workloadSpec('wA', [{ op: 'exit', code: 0 }])
     })
     let thrown: unknown
     try {
       await plane.settleShadow({
-        orcaRunRef: opened.orcaRunRef,
-        orcaDispatchRef: makeOrcaDispatchRef('ctx_not_a_real_shadow_dispatch'),
-        result
+        orcaRunRef: a.orcaRunRef, // run A
+        orcaDispatchRef: b.orcaDispatchRef, // but B's (valid) Dispatch
+        result: { exitCode: 0, filesChanged: [], cancelled: false, cancelledMidFlight: false }
       })
-    } catch (error) {
-      thrown = error
+    } catch (e) {
+      thrown = e
     }
     expect(thrown).toBeInstanceOf(ExecutionPlaneError)
-    expect((thrown as ExecutionPlaneError).code).toBe('dispatch_mismatch')
+    expect((thrown as ExecutionPlaneError).code).toBe('run_dispatch_pair_mismatch')
+  })
+
+  it('B2: the correlation id is durable on the Orca side — findShadowRunByCorrelation resolves it', async () => {
+    const plane = makePlane()
+    const opened = await open(plane, 'wc', 'corr_marker')
+    const found = plane.findShadowRunByCorrelation(makeCorrelationId('corr_marker'))
+    expect(found).toBeDefined()
+    expect(String(found!.orcaDispatchRef)).toBe(String(opened.orcaDispatchRef))
+    expect(found!.settled).toBe(false)
+    expect(plane.findShadowRunByCorrelation(makeCorrelationId('never'))).toBeUndefined()
   })
 })

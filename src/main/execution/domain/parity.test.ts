@@ -5,103 +5,130 @@ import {
   filesChangedSet,
   ParityObservationError,
   type ExecutionOutcome,
-  type ParityObservation
+  type ParityObservation,
+  type RootCauseAdjudication
 } from './parity'
 
 const base: ExecutionOutcome = {
   terminalOutcome: 'completed',
   exitDisposition: 'zero_exit',
   cancellationBehavior: 'not_cancelled',
-  filesChanged: null
+  filesChanged: []
 }
 
-describe('compareOutcomes (amendment §S gate 8)', () => {
-  it('matches when the three recorded dimensions agree and files were not recorded', () => {
-    const r = compareOutcomes(base, { ...base, filesChanged: filesChangedSet(['a', 'b']) })
-    expect(r.match).toBe(true)
-    expect(r.divergences).toEqual([])
-    expect(r.notComparable).toEqual(['files_changed'])
+describe('compareOutcomes', () => {
+  it('matches on identical outcomes', () => {
+    expect(compareOutcomes(base, { ...base }).match).toBe(true)
   })
-
-  it('diverges on terminal outcome + exit disposition', () => {
-    const r = compareOutcomes(base, {
-      ...base,
-      terminalOutcome: 'failed',
-      exitDisposition: 'non_zero_exit'
-    })
+  it('diverges on files_changed when both sides recorded a set', () => {
+    const r = compareOutcomes(
+      { ...base, filesChanged: filesChangedSet(['a']) },
+      { ...base, filesChanged: filesChangedSet(['a', 'b']) }
+    )
     expect(r.match).toBe(false)
-    expect(r.divergences.map((d) => d.dimension).sort()).toEqual([
-      'exit_disposition',
-      'terminal_outcome'
-    ])
+    expect(r.divergences.map((d) => d.dimension)).toEqual(['files_changed'])
   })
-
   it('diverges on cancellation granularity', () => {
-    const auth = {
+    const a = {
       ...base,
       terminalOutcome: 'cancelled' as const,
       cancellationBehavior: 'cancelled_clean' as const,
       exitDisposition: 'no_exit' as const
     }
-    const shadow = { ...auth, cancellationBehavior: 'cancelled_mid_flight' as const }
-    const r = compareOutcomes(auth, shadow)
-    expect(r.divergences.map((d) => d.dimension)).toEqual(['cancellation'])
-  })
-
-  it('compares files-changed only when the authoritative side recorded it', () => {
-    const auth = { ...base, filesChanged: filesChangedSet(['x', 'y']) }
-    const same = compareOutcomes(auth, { ...base, filesChanged: filesChangedSet(['y', 'x']) })
-    expect(same.match).toBe(true)
-    const diff = compareOutcomes(auth, { ...base, filesChanged: filesChangedSet(['x', 'z']) })
-    expect(diff.match).toBe(false)
-    expect(diff.divergences.map((d) => d.dimension)).toEqual(['files_changed'])
-    expect(diff.notComparable).toEqual([])
+    const s = { ...a, cancellationBehavior: 'cancelled_mid_flight' as const }
+    expect(compareOutcomes(a, s).divergences.map((d) => d.dimension)).toEqual(['cancellation'])
   })
 })
 
-describe('assertObservationComplete (I7)', () => {
-  const obs = (over: Partial<ParityObservation>): ParityObservation => ({
+// Blocker B9 — a bare label is not adjudication. Every divergence needs an
+// `explained` adjudication with evidence; an `unresolved` one fails the gate.
+describe('assertObservationComplete (blocker B9)', () => {
+  const obs = (
+    parity: ParityObservation['parity'],
+    adjudications: RootCauseAdjudication[]
+  ): ParityObservation => ({
     id: 'p1',
     runBindingDispatchId: 'ctx_1',
     sliceRef: 'ORCA-S1',
+    workloadId: 'w',
     authoritative: base,
     shadow: base,
-    parity: { match: true, divergences: [], notComparable: [] },
-    rootCause: null,
-    observedAt: '2026-09-08T00:00:00Z',
-    ...over
+    parity,
+    adjudications,
+    observedAt: '2026-09-08T00:00:00Z'
   })
 
-  it('passes a matched observation with no root cause', () => {
-    expect(() => assertObservationComplete(obs({}))).not.toThrow()
+  it('passes a matched observation', () => {
+    expect(() =>
+      assertObservationComplete(obs({ match: true, divergences: [], notComparable: [] }, []))
+    ).not.toThrow()
   })
 
-  it('rejects a mismatched observation with an empty root cause', () => {
+  it('throws when a divergence has an unresolved adjudication', () => {
     expect(() =>
       assertObservationComplete(
-        obs({
-          parity: {
+        obs(
+          {
             match: false,
             divergences: [{ dimension: 'cancellation', authoritative: 'a', shadow: 'b' }],
             notComparable: []
           },
-          rootCause: '   '
-        })
+          [
+            {
+              status: 'unresolved',
+              dimension: 'cancellation',
+              observedMismatch: 'cancellation: a vs b',
+              classifiedCause: null,
+              evidence: ['cancellation: a vs b']
+            }
+          ]
+        )
       )
     ).toThrow(ParityObservationError)
   })
 
-  it('passes a mismatched observation once it is root-caused', () => {
+  it('throws when a divergence has an explained adjudication but no evidence', () => {
     expect(() =>
       assertObservationComplete(
-        obs({
-          parity: {
+        obs(
+          {
             match: false,
-            divergences: [{ dimension: 'cancellation', authoritative: 'a', shadow: 'b' }],
+            divergences: [{ dimension: 'files_changed', authoritative: 'a', shadow: 'b' }],
             notComparable: []
           },
-          rootCause: 'authoritative_cancellation_granularity_not_recorded'
-        })
+          [
+            {
+              status: 'explained',
+              dimension: 'files_changed',
+              observedMismatch: 'x',
+              classifiedCause: 'some_cause',
+              evidence: []
+            }
+          ]
+        )
+      )
+    ).toThrow(ParityObservationError)
+  })
+
+  it('passes when every divergence is explained with evidence', () => {
+    expect(() =>
+      assertObservationComplete(
+        obs(
+          {
+            match: false,
+            divergences: [{ dimension: 'files_changed', authoritative: 'a', shadow: 'b' }],
+            notComparable: []
+          },
+          [
+            {
+              status: 'explained',
+              dimension: 'files_changed',
+              observedMismatch: 'x',
+              classifiedCause: 'shadow_input_worktree_divergence',
+              evidence: ['shadow input carried src/extra.txt']
+            }
+          ]
+        )
       )
     ).not.toThrow()
   })

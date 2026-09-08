@@ -2,35 +2,20 @@
 // NO Orca row types here (amendment §P.6). Only opaque refs + value objects.
 
 import type {
+  CorrelationId,
   GovernanceAgentRunRef,
   OrcaDispatchRef,
   OrcaRunRef,
   OrgTaskRef
 } from '../domain/execution-identity'
 import type { ExecutionOutcome } from '../domain/parity'
+import type { ShadowExecutionResult, WorkloadSpec } from '../domain/workload-spec'
 
-/** A deterministic, repo-local, code-only workload — the only kind this slice dispatches. */
-export type WorkloadStep =
-  | { op: 'write'; path: string; content: string }
-  | { op: 'delete'; path: string }
-  | { op: 'exit'; code: number }
-  | { op: 'cancel'; midFlight: boolean }
-
-export type SyntheticWorkload = {
-  id: string
-  steps: readonly WorkloadStep[]
-}
-
-export type ShadowExecutionResult = {
-  exitCode: number | null
-  filesChanged: readonly string[]
-  cancelled: boolean
-  cancelledMidFlight: boolean
-  error?: string
-}
+export type { ShadowExecutionResult, WorkloadSpec } from '../domain/workload-spec'
 
 export type ExecutionPlaneErrorCode =
   | 'dispatch_mismatch'
+  | 'run_dispatch_pair_mismatch'
   | 'open_failed'
   | 'run_failed'
   | 'settle_failed'
@@ -45,25 +30,41 @@ export class ExecutionPlaneError extends Error {
   }
 }
 
+export type OpenedShadowRun = {
+  orcaRunRef: OrcaRunRef
+  orcaDispatchRef: OrcaDispatchRef
+  orgTaskRef: OrgTaskRef
+  baseCommit: string
+}
+
 /**
  * The shadow execution plane. An implementation is an infrastructure adapter
- * (e.g. the Orca adapter). Advisory only — nothing here touches an authoritative
- * run or `data/app.db`.
+ * (the Orca adapter). Advisory only — nothing here touches an authoritative run
+ * or `data/app.db`.
  */
 export type ExecutionPlane = {
   openShadowRun(input: {
     sliceRef: string
     workloadId: string
-    baseCommit: string
+    correlationId: CorrelationId
     governanceAgentRunId: GovernanceAgentRunRef
-  }): Promise<{ orcaRunRef: OrcaRunRef; orcaDispatchRef: OrcaDispatchRef; orgTaskRef: OrgTaskRef }>
+    worktreeDir: string
+    seededFiles: readonly { path: string; content: string }[]
+    /** Untracked-after-base content the shadow input worktree carried (amendment 001 §4). */
+    postBaseFiles: readonly { path: string; content: string }[]
+  }): Promise<OpenedShadowRun>
 
   runShadowWorkload(input: {
+    orcaRunRef: OrcaRunRef
     orcaDispatchRef: OrcaDispatchRef
-    workload: SyntheticWorkload
-    worktreeDir: string
+    workload: WorkloadSpec
   }): Promise<ShadowExecutionResult>
 
+  /**
+   * Blocker B3 — validates that `orcaDispatchRef` genuinely belongs to
+   * `orcaRunRef` (a valid-but-foreign Dispatch, or a stale one, is rejected)
+   * on the production path, before any settlement write.
+   */
   settleShadow(input: {
     orcaRunRef: OrcaRunRef
     orcaDispatchRef: OrcaDispatchRef
@@ -75,4 +76,18 @@ export type ExecutionPlane = {
     orcaDispatchRef: OrcaDispatchRef
     reason: string
   }): Promise<void>
+
+  /**
+   * Reconciliation lookup (blocker B2) — resolves a durable correlation id to
+   * the shadow run/dispatch state, reading the marker persisted on the Orca
+   * side. Returns undefined when no shadow Dispatch was ever created.
+   */
+  findShadowRunByCorrelation(correlationId: CorrelationId):
+    | {
+        orcaRunRef: OrcaRunRef
+        orcaDispatchRef: OrcaDispatchRef
+        orgTaskRef: OrgTaskRef
+        settled: boolean
+      }
+    | undefined
 }

@@ -1,11 +1,10 @@
 // Execution bounded context — domain. Pure.
-// SHADOW_EXECUTION_SAFETY_POLICY (amendment §I). Advisory-only shadow execution
-// must not create duplicate real-world side effects.
+// SHADOW_EXECUTION_SAFETY_POLICY (amendment §I, hardened by amendment 001 §6 /
+// blocker B5). Advisory-only shadow execution must not create duplicate
+// real-world side effects, and a caller-supplied string is never acceptance.
 
 export type WorkloadKind = 'synthetic' | 'sandboxed' | 'repo_local_code_only' | 'external_effect'
 
-// Capabilities that make a workload ineligible for shadow execution unless an
-// explicit, registered, independently-accepted isolation strategy is present.
 export type ProhibitedCapability =
   | 'send_message'
   | 'mutate_external_service'
@@ -22,9 +21,16 @@ export type IsolationStrategyKind =
   | 'credential_less_profile'
   | 'disposable_environment'
 
-export type IsolationStrategy = {
+/**
+ * A durable, verifiable isolation decision. Independent acceptance requires
+ * **actor separation**: `authoredBy` and `acceptedBy` must both be present,
+ * neither may be the placeholder `"self"`, and they must differ.
+ */
+export type IsolationDecision = {
   kind: IsolationStrategyKind
-  /** Non-empty when a human/independent acceptance has registered this strategy. */
+  /** Stable reference to the durable decision record (not free text). */
+  decisionRef: string
+  authoredBy: string
   acceptedBy: string
   note: string
 }
@@ -33,7 +39,7 @@ export type WorkloadDescriptor = {
   id: string
   kind: WorkloadKind
   declaredCapabilities: readonly ProhibitedCapability[]
-  isolationStrategy?: IsolationStrategy
+  isolationDecision?: IsolationDecision
 }
 
 export type SafetyDecision =
@@ -43,7 +49,7 @@ export type SafetyDecision =
 export type SafetyRejectionCode =
   | 'prohibited_capability'
   | 'external_effect_without_isolation'
-  | 'isolation_not_accepted'
+  | 'isolation_actor_not_separated'
   | 'unknown_kind'
 
 const SAFE_KINDS: ReadonlySet<WorkloadKind> = new Set([
@@ -52,20 +58,28 @@ const SAFE_KINDS: ReadonlySet<WorkloadKind> = new Set([
   'repo_local_code_only'
 ])
 
+const PLACEHOLDER_ACTORS: ReadonlySet<string> = new Set(['self', 'me', 'implementer', 'caller', ''])
+
+function isActorSeparated(decision: IsolationDecision): boolean {
+  const authored = decision.authoredBy.trim().toLowerCase()
+  const accepted = decision.acceptedBy.trim().toLowerCase()
+  if (decision.decisionRef.trim().length === 0) {
+    return false
+  }
+  if (PLACEHOLDER_ACTORS.has(authored) || PLACEHOLDER_ACTORS.has(accepted)) {
+    return false
+  }
+  return authored !== accepted
+}
+
 /**
- * Frozen rule (amendment §I). Eligible iff the workload cannot produce a
- * duplicate real-world side effect:
- *  - kind ∈ {synthetic, sandboxed, repo_local_code_only} AND no prohibited
- *    capability is declared; or
- *  - a prohibited capability / kind 'external_effect' is present ONLY with an
- *    isolation strategy that has a non-empty `acceptedBy` (independently accepted).
- * Shadow parity never justifies duplicating an external effect.
+ * Conservative for ORCA-S1 (amendment 001 §6): auto-admit ONLY synthetic /
+ * sandboxed / repo_local_code_only workloads with zero declared prohibited
+ * capabilities. An `external_effect` workload, or any declared capability, is
+ * admitted only with an `IsolationDecision` whose actors are proven separated.
  */
 export function classifyShadowWorkload(descriptor: WorkloadDescriptor): SafetyDecision {
   const hasProhibited = descriptor.declaredCapabilities.length > 0
-  const isolationPresent = descriptor.isolationStrategy !== undefined
-  const isolationAccepted =
-    isolationPresent && descriptor.isolationStrategy!.acceptedBy.trim().length > 0
   const needsIsolation = hasProhibited || descriptor.kind === 'external_effect'
 
   if (descriptor.kind !== 'external_effect' && !SAFE_KINDS.has(descriptor.kind)) {
@@ -80,27 +94,28 @@ export function classifyShadowWorkload(descriptor: WorkloadDescriptor): SafetyDe
     return { eligible: true, reason: `${descriptor.kind} with no declared side effects` }
   }
 
-  if (isolationAccepted) {
-    return { eligible: true, reason: 'side-effecting workload isolated by an accepted strategy' }
-  }
-  if (isolationPresent) {
+  if (!descriptor.isolationDecision) {
     return {
       eligible: false,
-      code: 'isolation_not_accepted',
-      reason: 'the isolation strategy has no independent acceptance (acceptedBy is empty)'
+      code: hasProhibited ? 'prohibited_capability' : 'external_effect_without_isolation',
+      reason: hasProhibited
+        ? `declares a prohibited capability without an isolation decision: ${descriptor.declaredCapabilities.join(', ')}`
+        : 'external_effect workloads need a durable isolation decision'
     }
   }
-  if (hasProhibited) {
+
+  if (!isActorSeparated(descriptor.isolationDecision)) {
     return {
       eligible: false,
-      code: 'prohibited_capability',
-      reason: `declares a prohibited capability without an accepted isolation strategy: ${descriptor.declaredCapabilities.join(', ')}`
+      code: 'isolation_actor_not_separated',
+      reason:
+        'the isolation decision lacks actor separation (authoredBy/acceptedBy must both be real, distinct, non-"self")'
     }
   }
+
   return {
-    eligible: false,
-    code: 'external_effect_without_isolation',
-    reason: 'external_effect workloads need a registered, independently-accepted isolation strategy'
+    eligible: true,
+    reason: 'side-effecting workload isolated by an actor-separated decision'
   }
 }
 

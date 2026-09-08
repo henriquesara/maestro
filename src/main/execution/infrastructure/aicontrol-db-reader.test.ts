@@ -3,12 +3,12 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { AiControlDbReader, sha256File } from './aicontrol-db-reader'
 import {
-  FROZEN_SAMPLE_REQUEST,
   makeTmpDir,
   writeFixtureAppDb
 } from '../slices/shadow-identity-observation/shadow-observation.test-support'
 
-// I1 — nothing this slice runs writes the authoritative aiControlCenter DB.
+// I1 — the reader opens data/app.db read-only, has no write method, and never
+// changes its bytes.
 describe('AiControlDbReader zero authoritative write (amendment §S gate 4)', () => {
   const cleanups: (() => void)[] = []
   afterEach(() => {
@@ -16,31 +16,30 @@ describe('AiControlDbReader zero authoritative write (amendment §S gate 4)', ()
       cleanups.pop()?.()
     }
   })
-
-  function fixtureDb(): string {
+  function fixtureDb() {
     const t = makeTmpDir('orca-s1-appdb-')
     cleanups.push(t.cleanup)
-    const path = join(t.dir, 'app.db')
-    writeFixtureAppDb(path)
-    return path
+    const p = join(t.dir, 'app.db')
+    writeFixtureAppDb(p)
+    return p
   }
 
-  it('leaves data/app.db byte-identical after a full sample read and creates no -wal/-shm', () => {
+  it('lists distinct agent profiles with their run ids and leaves the DB byte-identical', () => {
     const path = fixtureDb()
     const before = sha256File(path)
     const reader = new AiControlDbReader(path)
-    const entries = reader.resolveSample(FROZEN_SAMPLE_REQUEST)
+    const profiles = reader.listProfiles()
     reader.close()
-    const after = sha256File(path)
-    expect(after).toBe(before)
+    expect(sha256File(path)).toBe(before)
     expect(existsSync(`${path}-wal`)).toBe(false)
     expect(existsSync(`${path}-shm`)).toBe(false)
-    expect(entries.length).toBe(FROZEN_SAMPLE_REQUEST.slots.length)
+    expect(profiles.map((p) => p.agentId)).toEqual(['agent-A', 'agent-B', 'agent-C'])
+    expect(profiles[0].runIds).toContain('run_a_1')
+    expect(profiles[0].runIds.length).toBeGreaterThanOrEqual(2)
   })
 
   it('exposes no write-capable method', () => {
-    const names = Object.getOwnPropertyNames(AiControlDbReader.prototype)
-    for (const name of names) {
+    for (const name of Object.getOwnPropertyNames(AiControlDbReader.prototype)) {
       expect(name).not.toMatch(/insert|update|delete|write|exec|migrate|record/i)
     }
   })

@@ -109,14 +109,44 @@
 >   (6) `COMMIT`. Steps 4–5 are one SQLite transaction; the sidecar is written
 >   **before** that transaction opens. Required invariant — the only direction
 >   claimed: **a committed `dispatch_worktree` row ⇒ the identity sidecar was
->   successfully written before the DB commit** (never the reverse). Crash
->   windows **A–F** and their convergence behaviour are enumerated in §7.6.
->   **Orphan filesystem cleanup after an aborted bind is not owned by S3** — this
->   slice adds **no** filesystem deletion or reaping (§7.6, §10, §12 PROV-6,
->   PROV-11).
+>   successfully written before the DB commit** (never the reverse). Crash /
+>   classification windows **A–G** and their convergence behaviour are enumerated
+>   in §7.6. **Orphan filesystem cleanup after an aborted bind is not owned by
+>   S3** — this slice adds **no** filesystem deletion or reaping (§7.6, §10,
+>   §12 PROV-6, PROV-11).
+>
+> **Revision note 3 (candidate, pre-freeze — third focused correction).**
+> This revision corrects **only the remaining legacy-eligibility blocker** from
+> the final focused re-review of `da407ec6b6`. It is **not** an amendment and
+> reopens **none** of the previously-accepted decisions — C1 (identity sidecar
+> location), C2 crash ordering and windows **A–E**, B1 incident isolation, B3
+> source/projection model, B4 lifecycle boundary, B5 parity boundary, R1–R7, the
+> exact Git argv whitelist, the sibling-sweep placement, schema v3 → v4,
+> `settlement_incident` untouched, no authority transfer, and no M5 — all stand
+> verbatim.
+>
+> - **C3 — prospective Phase A eligibility.** Initial (Phase A) S3 provenance
+>   convergence is eligible **only** for a binding that has a
+>   `settlement_observation`, a **matching `dispatch_worktree` source row**, no
+>   `worktree_provenance`, and no open `worktree_provenance_incident`. A binding
+>   that has a `settlement_observation` but **no `dispatch_worktree` row and no
+>   `worktree_provenance` that ever existed** is a **legacy / pre-S3 binding**:
+>   `convergeWorktreeProvenance` returns it as
+>   **`LEGACY_BINDING_NOT_CONVERGEABLE`** — **no `worktree_provenance` row, no
+>   `worktree_provenance_incident`, no block, no heuristic reconstruction, no
+>   ORCA-S1/S2 effect** — surfaced in the report only. First S3 activation over N
+>   historical settled ORCA-S1/S2 bindings therefore produces **0 S3 incidents
+>   and 0 fabricated provenance rows** (§7.6 window F, §8 Phase A, §11, §12
+>   PROV-12, §14 gate 18). The **post-S3** contradiction is kept distinct: if a
+>   `worktree_provenance` row **already exists** and its required
+>   `dispatch_worktree` source row later disappears or contradicts the durable
+>   identity, that remains a **`worktree_dispatch_mismatch`** semantic source
+>   contradiction (§8 Phase B, §7.6 window G). `dispatch_worktree_row_absent` is
+>   retained **only** for that post-S3 case, where prior durable S3 state proves
+>   the row must exist.
 
 **State class:** `ARCHITECTURE_DEFINITION_READY`.
-**Display verdict:** `MAESTRO_ORCA_S3_ARCHITECTURE_SECOND_CORRECTION_READY_FOR_FOCUSED_REREVIEW`.
+**Display verdict:** `MAESTRO_ORCA_S3_ARCHITECTURE_LEGACY_ELIGIBILITY_CORRECTED_READY_FOR_FINAL_REREVIEW`.
 
 ---
 
@@ -317,10 +347,15 @@ and incident id; (c) is written **exactly once** per `correlation_id`, converges
 from durable state with **no hook / no notification / no in-flight process**, and
 is **idempotent** under repeat, concurrency, restart, and projection-rebuild;
 (d) raises a **blocking `worktree_provenance_incident`** (S3's own channel, never
-`settlement_incident`) — never a fabricated commit — when the worktree identity
-discriminator is missing or mismatched, the worktree is a confirmed
-non-repository, or a stable re-read disagrees with an already-recorded provenance;
-and (e) fills the latent `run_binding.candidate_head` on the durable path via a
+`settlement_incident`) — never a fabricated commit — when, **for a binding that
+has a `dispatch_worktree` source row or an already-recorded `worktree_provenance`
+row**, the worktree identity discriminator is missing or mismatched, the worktree
+is a confirmed non-repository, or a stable re-read disagrees with an
+already-recorded provenance; a binding with a `settlement_observation` but no
+`dispatch_worktree` row and no prior `worktree_provenance` is **legacy / pre-S3**
+— `LEGACY_BINDING_NOT_CONVERGEABLE`, **no row, no incident, no block** (§7.6
+window F, §12 PROV-12); and (e) fills the latent `run_binding.candidate_head` on
+the durable path via a
 `WHERE candidate_head IS NULL` CAS, raising `worktree_dispatch_mismatch` on a
 non-null disagreement rather than overwriting. **S3 produces only durable
 shadow-side artifact provenance — `base_commit`, `candidate_head`,
@@ -344,6 +379,7 @@ filesystem removal, no Orca-core change; authority stays `AICONTROL_NATIVE`.
 | Provenance sweep | `convergeWorktreeProvenance(sliceRef, now)` — a **sibling** two-phase scan (A: record new; B: re-verify recorded), invoked by the composition boundary **after** `reconcileShadowExecutionState(...)`. **Never a phase inside the ORCA-S2 coordinator.** |
 | Provenance incident | A `worktree_provenance_incident` row (S3's **own** table, **never** `settlement_incident`) with an S3 `kind`: `worktree_missing`, `worktree_dispatch_mismatch`, `provenance_snapshot_changed`. Its open-incident predicate gates **only** S3 convergence. |
 | Retryable convergence result | `WORKTREE_SOURCE_OPERATIONAL_RETRYABLE` (git timeout / IO / lock / spawn error), `WORKTREE_SOURCE_UNSTABLE_RETRYABLE` (double-read disagreed across the bounded budget), or `EXECUTION_STORE_BUSY_RETRYABLE` (write txn not acquired within the `SQLITE_BUSY` budget). **None** writes a durable row, raises an incident, or blocks the binding. All are surfaced in the report. |
+| `LEGACY_BINDING_NOT_CONVERGEABLE` | A binding with a `settlement_observation` but **no `dispatch_worktree` source row** and no `worktree_provenance` that ever existed — created before the S3 durable-worktree contract. `convergeWorktreeProvenance` skips it in Phase A: **no `worktree_provenance` row, no `worktree_provenance_incident`, no block, no heuristic reconstruction, no ORCA-S1/S2 effect** — reported only (count). It is **not** corruption. Distinct from the **post-S3** source contradiction (§7.6 window G) — an existing `worktree_provenance` whose `dispatch_worktree` source row later vanishes or contradicts identity — which stays `worktree_dispatch_mismatch`. |
 | Opaque ref | `OrcaDispatchRef` / `OrcaRunRef` — branded strings. No Orca row type crosses the port (§P.6). |
 
 ## 5. Inputs / outputs
@@ -367,8 +403,10 @@ filesystem removal, no Orca-core change; authority stays `AICONTROL_NATIVE`.
 - `worktree_provenance_incident` rows for the three S3 `kind`s (blocking,
   non-fabricating) — **never** `settlement_incident`.
 - A `WorktreeProvenanceReport` + frozen evidence bundle (JSON), analogous to
-  ORCA-S2's `settlement-evidence-bundle.json`, carrying the observed set,
-  incidents, and the retryable list (`WORKTREE_SOURCE_OPERATIONAL_RETRYABLE` /
+  ORCA-S2's `settlement-evidence-bundle.json`, carrying the observed set, the
+  **legacy / non-convergeable set** (`LEGACY_BINDING_NOT_CONVERGEABLE`, count and
+  correlation ids — never a silent skip), incidents, and the retryable list
+  (`WORKTREE_SOURCE_OPERATIONAL_RETRYABLE` /
   `WORKTREE_SOURCE_UNSTABLE_RETRYABLE` / `EXECUTION_STORE_BUSY_RETRYABLE`, each
   with attempt counts — never a silent skip) and a `gitGuard` block (whitelisted
   argv only; HEAD / index-mtime / object-count deltas all zero).
@@ -399,8 +437,14 @@ filesystem removal, no Orca-core change; authority stays `AICONTROL_NATIVE`.
   transaction opens (§7.6 step 2); SQLite and filesystem writes are **not** one
   atomic commit.
 - `worktree_provenance_incident: (absent) → present (blocked=1)` — a stable
-  semantic contradiction (§7.3). `evidence_digest` never overwritten; a genuinely
-  different evidence snapshot is a new row.
+  semantic contradiction (§7.3), **only** for a binding that has a
+  `dispatch_worktree` source row or an already-recorded `worktree_provenance`
+  row. `evidence_digest` never overwritten; a genuinely different evidence
+  snapshot is a new row.
+- `(no state change) — LEGACY_BINDING_NOT_CONVERGEABLE` — a binding with a
+  `settlement_observation` but no `dispatch_worktree` row and no prior
+  `worktree_provenance` (legacy / pre-S3). Reported only; **no row, no incident,
+  no block** (§7.6 window F, §12 PROV-12).
 
 **Forbidden:**
 
@@ -410,6 +454,10 @@ filesystem removal, no Orca-core change; authority stays `AICONTROL_NATIVE`.
 - Any `worktree_provenance` artifact-column mutation after Phase A.
 - Any `worktree_provenance` row for an unresolved case (missing/mismatched
   identity, confirmed non-repository) — those are **incident-only, no row**.
+- Any `worktree_provenance_incident` for a **legacy / pre-S3 binding** (a
+  `settlement_observation` with no `dispatch_worktree` row and no prior
+  `worktree_provenance`) — it is `LEGACY_BINDING_NOT_CONVERGEABLE`, never an
+  incident, never a block (§7.6 window F, §12 PROV-12).
 - Writing a `base_commit` / `candidate_head` that was not read from a real Git
   object of the identity-matched dispatch's worktree (no reconstruction from
   logs, no "empty tree" placeholder, no copy from a sibling binding, no sentinel).
@@ -561,7 +609,11 @@ CREATE INDEX IF NOT EXISTS worktree_provenance_incident_by_slice
     `dispatch_worktree` row is absent), and `failedCheck ∈
     { identity_discriminator_absent, identity_discriminator_mismatch,
       dispatch_worktree_row_absent, base_commit_disagreement,
-      candidate_head_disagreement }`.
+      candidate_head_disagreement }`. `dispatch_worktree_row_absent` is raised
+    **only** in Phase B, for a binding that **already has** a `worktree_provenance`
+    row whose source row later vanished (§7.6 window G); a Phase A binding with no
+    `dispatch_worktree` row and no prior provenance is
+    `LEGACY_BINDING_NOT_CONVERGEABLE` (§7.6 window F), **never** an incident.
   - `provenance_snapshot_changed` — the **new stable** conflicting
     `provenance_digest` **is** the `evidence_digest` (mirrors ORCA-S2
     `source_snapshot_changed`).
@@ -642,16 +694,17 @@ Steps 4–5 are **one** SQLite transaction. The sidecar (step 2) is written
 the DB commit.** The reverse is **not** claimed — a sidecar present on disk does
 **not** imply a committed `dispatch_worktree` row.
 
-**Crash windows:**
+**Crash / classification windows:**
 
-| # | Crash point | Durable DB state | Filesystem state | S3 behaviour |
+| # | Crash / classification point | Durable DB state | Filesystem state | S3 behaviour |
 | --- | --- | --- | --- | --- |
 | **A** | after worktree creation, before the sidecar (step 1→2) | no `run_binding`, no `dispatch_worktree` | orphan worktree, no sidecar | S3 **does not act** (no source rows); orphan-worktree cleanup **deferred** to a later lifecycle slice — **not S3**. |
 | **B** | after the sidecar, before the DB transaction (step 2→3) | no `run_binding`, no `dispatch_worktree` | orphan worktree **+ orphan sidecar** | S3 **does not act**; orphan worktree + sidecar cleanup **deferred** — **not S3**. |
 | **C** | during the transaction, before `COMMIT` (steps 3–5) | `run_binding` **and** `dispatch_worktree` both roll back / absent | orphan worktree + sidecar | S3 **does not act**; orphan filesystem state cleanup **deferred** — **not S3**. |
 | **D** | after `COMMIT` (step 6+) | committed `run_binding` **+** `dispatch_worktree` | worktree + previously-written sidecar present | **restart-safe normal convergence** — the next sibling sweep resolves identity and records provenance exactly once. |
 | **E** | any time after commit, then the sidecar later goes **missing or corrupt** | committed `dispatch_worktree` | sidecar absent / unparseable / not exactly equal to the row | `worktree_dispatch_mismatch` (`identity_discriminator_absent` / `identity_discriminator_mismatch`); **S3 provenance blocked for this binding only**; **no `worktree_provenance` row**; **no reconstruction, no fabricated SHA**. ORCA-S1 / ORCA-S2 sweeps unaffected. |
-| **F** | `run_binding` exists but `dispatch_worktree` is **absent** — legacy / pre-S3 bind shape (never the crash-C partial, which rolls back both) | `run_binding` only | any | `worktree_dispatch_mismatch` (`dispatch_worktree_row_absent`); **no row**; **no heuristic reconstruction** of the missing source row. |
+| **F** | `run_binding` **+ `settlement_observation`** exist, `dispatch_worktree` is **absent**, **and no `worktree_provenance` for this binding ever existed** — legacy / pre-S3 bind shape (never the crash-C partial, which rolls back both) | `run_binding` (+ `settlement_observation`) only | any | **`LEGACY_BINDING_NOT_CONVERGEABLE`** — **no `worktree_provenance` row, no `worktree_provenance_incident`, not blocked, no heuristic reconstruction, no ORCA-S1/S2 effect**; reported as legacy / non-convergeable. **Not classified as corruption.** |
+| **G** | a `worktree_provenance` row **already exists** for this binding, but its required `dispatch_worktree` source row is later **absent** or **contradicts** the durable identity — a **post-S3** source contradiction (prior durable S3 state proves the row must exist) | committed `worktree_provenance`; `dispatch_worktree` gone / identity-mismatched | any | `worktree_dispatch_mismatch` (`dispatch_worktree_row_absent` / `identity_discriminator_absent` / `identity_discriminator_mismatch`); **Phase B**; `status` **unchanged**; **binding blocked**; **no row rewrite**; **no reconstruction, no fabricated SHA**. ORCA-S1 / ORCA-S2 sweeps unaffected. |
 
 Windows **A–C** leave **orphan filesystem state and no DB source rows**;
 `convergeWorktreeProvenance` reads `dispatch_worktree` + `settlement_observation`
@@ -660,6 +713,18 @@ aborted bind is not owned by S3** — this slice adds **no** `rm` / `rmSync` /
 `rmdir` / `unlink` / `git worktree remove` / directory or file deletion on any
 path (§6 forbidden, §10, §12 PROV-6). Governed cleanup is deferred to a later
 lifecycle / delegation-preparation slice.
+
+**Window F is not an incident.** A binding with a `settlement_observation` but no
+`dispatch_worktree` row and no `worktree_provenance` that ever existed is
+**legacy / pre-S3**: `convergeWorktreeProvenance` classifies it
+`LEGACY_BINDING_NOT_CONVERGEABLE` and moves on — 0 rows, 0 incidents, no block,
+no ORCA-S1/S2 effect. Phase A eligibility (§8) is therefore **prospective**: it
+requires the `dispatch_worktree` source row to be present.
+`dispatch_worktree_row_absent` is reserved for **window G** — an **existing**
+`worktree_provenance` whose source row later vanishes or contradicts identity,
+detected in Phase B, where prior durable S3 state proves the row must exist. A
+window where `run_binding` is committed but `dispatch_worktree` is not (a crash-C
+partial) is **impossible** — §7.6 steps 4–5 are one SQLite transaction.
 
 ## 8. Convergence design — sibling two-phase sweep (mirrors ORCA-S2 §8)
 
@@ -672,13 +737,22 @@ shadow worktree filesystem, and writes **only** `worktree_provenance`,
 **no** abandon, **no** reap, **no** filesystem removal, **no** Git write, and is
 **never** a phase inside the ORCA-S2 coordinator.
 
-**Phase A — record.** For each `run_binding` that has a `settlement_observation`
-(`status ∈ {observed, observed_conflicted}`), **no** `worktree_provenance`, and
+**Phase A — record.** Eligibility is **prospective**: a binding converges only if
+it was created under the S3 durable-worktree contract. For each `run_binding`
+that has a `settlement_observation` (`status ∈ {observed, observed_conflicted}`),
+a **matching `dispatch_worktree` source row**, **no** `worktree_provenance`, and
 **no** open `worktree_provenance_incident`:
 
 1. **Resolve** the `dispatch_worktree` row for `binding.orca_dispatch_id` (never
-   heuristically from logs — §L). Row absent → `worktree_dispatch_mismatch`
-   (`failedCheck = dispatch_worktree_row_absent`), no row, return.
+   heuristically from logs — §L). **Row absent** → the binding predates the S3
+   durable-worktree contract (§7.6 window F): return
+   **`LEGACY_BINDING_NOT_CONVERGEABLE`** — **no `worktree_provenance` row, no
+   `worktree_provenance_incident`, not blocked, no heuristic reconstruction, no
+   ORCA-S1/S2 effect** — surfaced in the report only.
+   `worktree_dispatch_mismatch` (`dispatch_worktree_row_absent`) is **not** raised
+   in Phase A; it is reserved for the Phase B post-S3 contradiction (§7.6
+   window G), where an already-recorded `worktree_provenance` proves the source
+   row must exist.
 2. **Verify identity first, before any provenance read.** Read the
    Execution-owned identity sidecar
    `<durableShadowWorktreeRoot>/identity/<orcaDispatchId>.json` (a plain file
@@ -739,8 +813,19 @@ shadow worktree filesystem, and writes **only** `worktree_provenance`,
 **Phase B — re-verify.** For each `worktree_provenance` with `status='recorded'`
 and **no** open `worktree_provenance_incident`:
 
-1. Re-verify identity (step A2). A discriminator that is now absent/mismatched →
-   `worktree_dispatch_mismatch`, `status` unchanged, binding blocked.
+1. **Re-verify the durable source (post-S3 contradiction detection — §7.6
+   window G).** The `dispatch_worktree` row **must still exist** and still match
+   `run_binding`'s correlation/run/dispatch identity, and identity
+   re-verification (step A2) must still pass. Because a `worktree_provenance` row
+   already exists for this binding, its `dispatch_worktree` source row was proven
+   present at record time — so a `dispatch_worktree` row now **absent**, or one
+   that **contradicts** the durable identity, or a sidecar now absent/mismatched,
+   is a **post-S3 semantic source contradiction** → `worktree_dispatch_mismatch`
+   (`dispatch_worktree_row_absent` / `identity_discriminator_absent` /
+   `identity_discriminator_mismatch`), `status` **unchanged**, binding **blocked**,
+   **no row rewrite**. This is **not** the legacy skip — a legacy / pre-S3
+   binding never reaches Phase B because it never received a `worktree_provenance`
+   row (§7.6 window F, §8 Phase A).
 2. Re-read the worktree (step A3) and recompute `provenance_digest`.
    - stable-and-equal → **no-op**;
    - stable-and-different → **one** `provenance_snapshot_changed` incident +
@@ -858,8 +943,9 @@ moving the durable `orchestration.db` out of that root (S2 §17).
 | --- | --- |
 | No `settlement_observation` for the binding yet | Skipped this pass — S3 only acts after ORCA-S2 converged settlement. |
 | Open `worktree_provenance_incident` for the binding (`resolved_at IS NULL`) | Skipped in both phases — S3-only block. ORCA-S2 / ORCA-S1 sweeps are **unaffected**. |
-| `dispatch_worktree` row absent | `worktree_dispatch_mismatch` (`dispatch_worktree_row_absent`); `blocked`; **no row**. |
-| Identity sidecar (`<durableShadowWorktreeRoot>/identity/<orcaDispatchId>.json`) absent / corrupt / not exactly equal to the `dispatch_worktree` row (and `run_binding`), or its canonicalized `worktreePath` resolves outside the durable root | `worktree_dispatch_mismatch` (`identity_discriminator_absent` / `identity_discriminator_mismatch`); `blocked`; **no row**. |
+| `dispatch_worktree` row absent **and no `worktree_provenance` ever existed** — legacy / pre-S3 binding (§7.6 window F) | **`LEGACY_BINDING_NOT_CONVERGEABLE`** — **no row, no incident, not blocked, no reconstruction, no ORCA-S1/S2 effect**; reported as legacy / non-convergeable. |
+| `dispatch_worktree` row absent / identity-contradicting **while a `worktree_provenance` row already exists** — post-S3 source loss (§7.6 window G) | `worktree_dispatch_mismatch` (`dispatch_worktree_row_absent` / `identity_discriminator_*`); **Phase B**; `blocked`; `status` unchanged; **no row rewrite**. |
+| Identity sidecar (`<durableShadowWorktreeRoot>/identity/<orcaDispatchId>.json`) absent / corrupt / not exactly equal to the `dispatch_worktree` row (and `run_binding`), or its canonicalized `worktreePath` resolves outside the durable root — **for a binding that has a `dispatch_worktree` row or an existing `worktree_provenance`** | `worktree_dispatch_mismatch` (`identity_discriminator_absent` / `identity_discriminator_mismatch`); `blocked`; **no row**. |
 | `run_binding` committed but `dispatch_worktree` never committed | **Impossible** — §7.6 steps 4–5 are one SQLite transaction (crash window C rolls back both). |
 | Identity OK; path is a **confirmed non-repository** / directory absent | `worktree_missing`; `blocked`; **no row**; **no fabricated SHA** (§F.7 analogue). |
 | Identity OK; `git` timed out / IO / lock / spawn / non-classifiable error | **`WORKTREE_SOURCE_OPERATIONAL_RETRYABLE`** — no row, **no incident**, not blocked; surfaced in the report; retried next sweep. |
@@ -955,10 +1041,24 @@ moving the durable `orchestration.db` out of that root (S2 §17).
   written atomically to the filesystem **before** that transaction (§7.6 step 2).
   **SQLite and filesystem writes are NOT a single atomic commit**, and the only
   guaranteed direction is *committed `dispatch_worktree` ⇒ sidecar already
-  written* — never the reverse. Crash windows A–F are enumerated in §7.6; orphan
-  filesystem state from windows A–C is **not** cleaned up by S3. Only
-  `worktree_provenance` and `worktree_provenance_incident` are
+  written* — never the reverse. Crash / classification windows A–G are enumerated
+  in §7.6; orphan filesystem state from windows A–C is **not** cleaned up by S3.
+  Only `worktree_provenance` and `worktree_provenance_incident` are
   projection-rebuildable.
+- **PROV-12 — prospective eligibility; legacy bindings are inert.** Initial
+  (Phase A) provenance convergence is eligible **only** for a binding with a
+  `settlement_observation` **and** a matching `dispatch_worktree` source row (and
+  no `worktree_provenance`, no open incident). A binding with a
+  `settlement_observation` but **no `dispatch_worktree` row and no
+  `worktree_provenance` that ever existed** is **legacy / pre-S3** and returns
+  **`LEGACY_BINDING_NOT_CONVERGEABLE`**: no `worktree_provenance` row, no
+  `worktree_provenance_incident`, no block, no heuristic reconstruction, no
+  ORCA-S1/S2 effect — reported only. First S3 activation over N historical
+  settled ORCA-S1/S2 bindings writes **0 provenance rows and 0 incidents**. The
+  **post-S3** contradiction is distinct and still detected: an **existing**
+  `worktree_provenance` whose `dispatch_worktree` source row later disappears or
+  contradicts the durable identity is `worktree_dispatch_mismatch` (§7.6
+  window G, §8 Phase B).
 
 ## 13. Out of scope (explicit)
 
@@ -1014,8 +1114,8 @@ moving the durable `orchestration.db` out of that root (S2 §17).
    write / column / schema change anywhere**; **no `parity_observation` read /
    write / column anywhere**; **`reconcile-shadow-execution-state.ts` and
    `orca-execution-plane.ts` byte-unchanged**.
-3. **TDD / RED evidence** — for PROV-1..PROV-11 and each §7.6 crash window
-   (A–F), a failing test captured **before** the behaviour it checks. Evidence:
+3. **TDD / RED evidence** — for PROV-1..PROV-12 and each §7.6 window
+   (A–G), a failing test captured **before** the behaviour it checks. Evidence:
    `slices/durable-worktree-provenance/RED-EVIDENCE.md`.
 4. **Zero authoritative writes** — call-site audit + runtime test: the whole
    slice writes nothing to `data/app.db` (SHA-256 unchanged, no sidecars),
@@ -1048,7 +1148,7 @@ moving the durable `orchestration.db` out of that root (S2 §17).
    provenance row exists; the next Phase B raises exactly one
    `provenance_snapshot_changed` incident, sets `status='conflicted'`, and leaves
    every artifact column byte-unchanged.
-10. **Restart safety / crash windows (§7.6 A–F)** — a separate-child-process
+10. **Restart safety / windows (§7.6 A–G)** — a separate-child-process
     harness (ORCA-S2 pattern): the child creates the durable worktree, writes the
     identity sidecar (temp + `rename`), then commits `run_binding` +
     `dispatch_worktree` in one transaction, checkpoints/closes, and is
@@ -1057,24 +1157,34 @@ moving the durable `orchestration.db` out of that root (S2 §17).
     cleanup of that orphan state); window **D** converges normally; window **E**
     (sidecar later missing/corrupt over a committed `dispatch_worktree`) →
     `worktree_dispatch_mismatch`, no row, no reconstruction; window **F**
-    (`run_binding` without `dispatch_worktree`) → `worktree_dispatch_mismatch`
-    (`dispatch_worktree_row_absent`), no heuristic reconstruction. A window where
-    `run_binding` is committed but `dispatch_worktree` is not is **impossible**
-    (§7.6 steps 4–5 are one transaction). Never a fabricated commit on any path.
+    (`run_binding` + `settlement_observation` but no `dispatch_worktree` row and
+    no prior `worktree_provenance` — legacy / pre-S3) →
+    **`LEGACY_BINDING_NOT_CONVERGEABLE`**, **no incident**, no row, no block, no
+    reconstruction, no ORCA-S1/S2 effect; window **G** (a `worktree_provenance`
+    row already exists and its `dispatch_worktree` source row later vanishes or
+    contradicts identity) → `worktree_dispatch_mismatch`
+    (`dispatch_worktree_row_absent`), Phase B, blocked, `status` unchanged, no
+    row rewrite, no reconstruction. A window where `run_binding` is committed but
+    `dispatch_worktree` is not is **impossible** (§7.6 steps 4–5 are one
+    transaction). Never a fabricated commit on any path.
 11. **No fabrication under loss** — make the worktree a confirmed non-repository
     (or delete the directory) before convergence: `worktree_missing` incident,
     `blocked`, **no `worktree_provenance` row**, **no synthesized SHA**, binding
     surfaced not silently dropped. And: induce a git **timeout / lock / IO**
     error → `WORKTREE_SOURCE_OPERATIONAL_RETRYABLE`, **never** `worktree_missing`.
-12. **Identity** — a binding whose identity sidecar
+12. **Identity** — a binding **that has a `dispatch_worktree` source row (or an
+    already-recorded `worktree_provenance`)** whose identity sidecar
     `<durableShadowWorktreeRoot>/identity/<orcaDispatchId>.json` is absent or
     corrupt, or carries a different `{ correlationId, orcaRunId, orcaDispatchId,
     worktreeNonce }`, or whose sidecar `worktreePath` canonicalizes **outside**
-    the durable root, or whose `dispatch_worktree` row is absent →
+    the durable root, or whose `dispatch_worktree` row later goes absent →
     `worktree_dispatch_mismatch` and **no row** (PROV-3). A reused/copied
     filesystem path with the wrong (or no) sidecar does **not** converge. The
     check behaves identically for a standalone worktree and a **linked** worktree
     (whose `.git` is a file) — the sidecar is never inside Git admin storage.
+    (A binding with a `settlement_observation` but **no `dispatch_worktree` row
+    and no prior `worktree_provenance`** is `LEGACY_BINDING_NOT_CONVERGEABLE`,
+    **not** a mismatch — gate 18, §7.6 window F, PROV-12.)
 13. **Incident isolation + no parity** — prove an open
     `worktree_provenance_incident` does **not** block `convergeSettlements`
     Phase A, `convergeSettlements` Phase B, or `reconcileIncompleteReservations`;
@@ -1104,6 +1214,23 @@ moving the durable `orchestration.db` out of that root (S2 §17).
     `WORKTREE_SOURCE_UNSTABLE_RETRYABLE`, `EXECUTION_STORE_BUSY_RETRYABLE` and
     prove none writes a durable row, none raises an incident, none blocks the
     binding, and each is surfaced in the report with an attempt count.
+18. **Legacy eligibility / prospective activation (PROV-12, §7.6 F/G)** — seed
+    the Execution store with **N historical settled ORCA-S1/S2 bindings**, each
+    with a `settlement_observation ∈ {observed, observed_conflicted}` and **no**
+    `dispatch_worktree` row (the shape produced before the S3 contract). Run the
+    **first** `convergeWorktreeProvenance` sweep (Phase A then B) and prove:
+    every such binding is reported **`LEGACY_BINDING_NOT_CONVERGEABLE`**;
+    **0** `worktree_provenance` rows and **0** `worktree_provenance_incident`
+    rows are written; no binding is blocked; `run_binding`,
+    `settlement_observation`, `parity_observation`, and `settlement_incident` are
+    byte-unchanged; and the ORCA-S1 + ORCA-S2 acceptance suites stay green and
+    byte-unchanged. Then, for a **post-S3** binding that already converged a
+    `worktree_provenance` row, delete or identity-contradict its
+    `dispatch_worktree` source row and prove the next **Phase B** raises exactly
+    one `worktree_dispatch_mismatch` (`dispatch_worktree_row_absent`), leaves
+    `status` and every artifact column byte-unchanged, and blocks **only** that
+    binding (§7.6 window G). Genuine post-S3 source loss is still detected;
+    historical pre-S3 state never becomes an incident.
 
 ## 15. Rollback
 
@@ -1164,7 +1291,9 @@ only** after the S3 split), `workload-git-runtime.ts` (`git()` helper pattern;
 comparator (`domain/parity.ts`) — **not invoked by S3**.
 
 **From ORCA-S2 (published `8eca5ddefc`):** `settlement_observation` (the
-**trigger** — S3 acts only on `status ∈ {observed, observed_conflicted}`),
+**trigger** — S3 acts only on `status ∈ {observed, observed_conflicted}`, **and
+only when a matching `dispatch_worktree` source row exists**; a settled binding
+without one is legacy / pre-S3 — `LEGACY_BINDING_NOT_CONVERGEABLE`, PROV-12),
 `withImmediateTransaction` + bounded `SQLITE_BUSY` → `EXECUTION_STORE_BUSY_RETRYABLE`,
 the two-phase read → re-verify → commit pattern, the retryable-result vocabulary,
 the versioned schema ladder (v3 → v4), the frozen-evidence-bundle pattern, the
@@ -1210,10 +1339,15 @@ modification); the `parity.ts` comparator / gate-8 (no parity work — B5).
    identity sidecars, or delete the worktree files? Is `dispatch_worktree`
    written in the **same transaction** as `run_binding`, with the sidecar written
    (atomically, temp + `rename`) **before** that transaction? Walk §7.6 windows
-   A–F: is any partial outcome unsafe, does S3 ever act on an orphan, and does S3
+   A–G: is any partial outcome unsafe, does S3 ever act on an orphan, and does S3
    ever delete/reap orphan filesystem state (it must not)? Is the invariant
    *committed `dispatch_worktree` ⇒ sidecar already written* actually guaranteed,
-   and is the reverse never assumed?
+   and is the reverse never assumed? Does the **first** activation over
+   historical pre-S3 bindings (no `dispatch_worktree` row) produce **0**
+   incidents and **0** provenance rows (window F —
+   `LEGACY_BINDING_NOT_CONVERGEABLE`), while a **post-S3** binding whose
+   `dispatch_worktree` row later vanishes over an existing `worktree_provenance`
+   still raises `worktree_dispatch_mismatch` (window G, Phase B)?
 7. **No "phase 2.5" (R7)** — is `reconcile-shadow-execution-state.ts`
    byte-unchanged? Is `convergeWorktreeProvenance` invoked strictly **after**
    `reconcileShadowExecutionState(...)` and never from inside it?
@@ -1244,4 +1378,4 @@ modification); the `parity.ts` comparator / gate-8 (no parity work — B5).
 
 _State class: `ARCHITECTURE_DEFINITION_READY` (candidate — not frozen, not
 independently accepted, not published)._
-_Display verdict: `MAESTRO_ORCA_S3_ARCHITECTURE_SECOND_CORRECTION_READY_FOR_FOCUSED_REREVIEW`._
+_Display verdict: `MAESTRO_ORCA_S3_ARCHITECTURE_LEGACY_ELIGIBILITY_CORRECTED_READY_FOR_FINAL_REREVIEW`._

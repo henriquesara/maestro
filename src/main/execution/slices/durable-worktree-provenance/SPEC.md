@@ -23,10 +23,11 @@
 >   kind. Operational Git/source failures are retryable, never incidents.
 > - **B2 — worktree identity.** Path alone is not identity. A durable identity
 >   discriminator `{ correlationId, orcaRunId, orcaDispatchId, worktreeNonce }`
->   is minted at bind time, written **into the worktree** (`.git/`-scoped, never
->   in any diff) and persisted on `dispatch_worktree`. Convergence requires an
->   exact match **before** any provenance read. `root_ref` / path / base-object
->   existence are corroborating evidence only (§7.2, §8, §12 PROV-3).
+>   is minted at bind time, written to an **Execution-owned identity sidecar**
+>   (storage location finalized by **C1** in Revision note 2 — outside `.git/`,
+>   outside the worktree) and persisted on `dispatch_worktree`. Convergence
+>   requires an exact match **before** any provenance read. `root_ref` / path /
+>   base-object existence are corroborating evidence only (§7.2, §8, §12 PROV-3).
 > - **B3 — source state vs projection.** `dispatch_worktree` is durable **source
 >   state**, written atomically with `run_binding` at the `recordBinding`
 >   composition seam (not from `orca-execution-plane.ts`). It is preserved across
@@ -65,9 +66,57 @@
 >   sweep** invoked by the composition boundary **after**
 >   `reconcileShadowExecutionState(...)` — **no "phase 2.5"** inside the ORCA-S2
 >   coordinator (R7, §2, §8).
+>
+> **Revision note 2 (candidate, pre-freeze — second focused correction).**
+> This revision corrects **only the two blockers** from the focused re-review of
+> `c800c0464f`. It is **not** an amendment, and it reopens **none** of the
+> previously-accepted decisions — B1 (isolated `worktree_provenance_incident`),
+> B3 (source/projection classification), B4 (lifecycle / parity-storage
+> boundary), B5 (no parity responsibility), R1–R7, the schema v3 → v4 shape, the
+> exact Git argv whitelist, `settlement_incident` untouched,
+> `reconcile-shadow-execution-state.ts` and `orca-execution-plane.ts` outside S3,
+> and the authority posture all stand verbatim. B2's identity *semantics* (path
+> alone is not identity; durable discriminator minted at bind time; exact match
+> **before** any provenance read; corroborating evidence only) also stand — only
+> its storage *location* is finalized here.
+>
+> - **C1 — identity sidecar location.** The identity discriminator is **no longer
+>   stored anywhere under `<worktree>/.git/`**, nor in any other Git
+>   administrative storage. Git admin storage is not a portable location — a
+>   linked worktree's `.git` is a *file*, and its real admin dir lives under the
+>   parent repo's `.git/worktrees/<name>/`, so a `<worktree>/.git/…` path is
+>   wrong for linked worktrees. The discriminator moves to an **Execution-owned
+>   identity sidecar** under the durable shadow-worktree root, outside Git admin
+>   storage and outside the worktree itself:
+>   `<durableShadowWorktreeRoot>/identity/<orcaDispatchId>.json` carrying
+>   `{ correlationId, orcaRunId, orcaDispatchId, worktreeNonce, sliceRef,
+>   worktreePath }`. `dispatch_worktree` persists the same identity fields.
+>   Convergence requires **exact equality** of the identity sidecar ==
+>   `dispatch_worktree` identity == `run_binding` correlation/run/dispatch
+>   identity (+ the Execution-minted immutable `worktreeNonce` on the sidecar and
+>   the row). `worktreePath` is canonicalized and must resolve **inside** the
+>   configured durable shadow-worktree root; `root_ref` / path remain
+>   corroborating metadata, never identity by themselves. Absence, corruption, or
+>   mismatch against a **committed** `dispatch_worktree` row →
+>   `worktree_dispatch_mismatch`; no heuristic reconstruction; **no Git-owned
+>   metadata location, no additional Git mutation** (§4, §7.2, §7.6, §8, §9,
+>   §12 PROV-3).
+> - **C2 — DB / filesystem crash consistency.** **SQLite and filesystem writes
+>   are NOT atomically committed together.** Bind-time ordering is pinned:
+>   (1) create the durable shadow worktree; (2) **atomically** write the identity
+>   sidecar (temp file + `rename` within the same durable root); (3)
+>   `BEGIN IMMEDIATE`; (4) insert `run_binding`; (5) insert `dispatch_worktree`;
+>   (6) `COMMIT`. Steps 4–5 are one SQLite transaction; the sidecar is written
+>   **before** that transaction opens. Required invariant — the only direction
+>   claimed: **a committed `dispatch_worktree` row ⇒ the identity sidecar was
+>   successfully written before the DB commit** (never the reverse). Crash
+>   windows **A–F** and their convergence behaviour are enumerated in §7.6.
+>   **Orphan filesystem cleanup after an aborted bind is not owned by S3** — this
+>   slice adds **no** filesystem deletion or reaping (§7.6, §10, §12 PROV-6,
+>   PROV-11).
 
 **State class:** `ARCHITECTURE_DEFINITION_READY`.
-**Display verdict:** `MAESTRO_ORCA_S3_ARCHITECTURE_CORRECTED_READY_FOR_FOCUSED_REREVIEW`.
+**Display verdict:** `MAESTRO_ORCA_S3_ARCHITECTURE_SECOND_CORRECTION_READY_FOR_FOCUSED_REREVIEW`.
 
 ---
 
@@ -189,8 +238,9 @@ S3 adds, all Execution-owned (new files):
 - the `worktree_provenance` aggregate (§7.1) and its SQLite store —
   **projection / evidence**, projection-rebuildable;
 - the `dispatch_worktree` aggregate (§7.2) and its SQLite store — durable
-  **SOURCE state**, written atomically with `run_binding`, **never**
-  projection-rebuilt;
+  **SOURCE state**, the row inserted in the same SQLite transaction as
+  `run_binding` (its identity sidecar written to the filesystem **before** that
+  transaction — §7.6), **never** projection-rebuilt;
 - the `worktree_provenance_incident` aggregate (§7.3) and its SQLite store —
   the **S3-only incident channel** (never `settlement_incident`);
 - a `DurableWorktreeSource` **read port** (application) + one read-only
@@ -210,19 +260,23 @@ S3 also **modifies these existing ORCA-S1/S2 Execution files** at the
 composition / application seam (no authority transfer):
 
 - `application/shadow-observation-service.ts` —
-  (a) writes the `dispatch_worktree` row **and** the on-disk identity
-  discriminator (§7.2, §8) in the **same Execution transaction as
-  `store.recordBinding(binding)`** (line 258); (b) threads the
+  (a) at bind time, in the pinned order of §7.6 — **atomically writes the
+  Execution-owned identity sidecar (temp file + `rename` within the durable root)
+  BEFORE opening the transaction**, then inserts the `dispatch_worktree` row **in
+  the same `withImmediateTransaction` as `store.recordBinding(binding)`**
+  (line 258). SQLite and filesystem writes are **not** one atomic commit
+  (§7.2, §7.6); (b) threads the
   `DurableWorktreeSource` + provenance/incident/`dispatch_worktree` store
   dependencies; (c) invokes `convergeWorktreeProvenance(...)` as a **sibling
   sweep immediately after** `reconcileShadowExecutionState(...)` (line 148),
   reading and writing **only** S3 state.
 - `slices/shadow-identity-observation/shadow-identity-observation.ts` — the
   single composition boundary constructs the **durable out-of-root shadow
-  worktree root** (via `durable-shadow-worktree-root.ts`), routes
-  `worktreeDirFor('shadow', …)` under it (the `'auth'` worktrees stay under
-  `DisposableShadowRoot`), constructs the `DurableWorktreeSource` + the three S3
-  stores, and owns the **cleanup split** (the durable shadow worktree root is
+  worktree root** (via `durable-shadow-worktree-root.ts`) and its
+  `<root>/identity/` sidecar subtree, routes `worktreeDirFor('shadow', …)` under
+  it (the `'auth'` worktrees stay under `DisposableShadowRoot`), constructs the
+  `DurableWorktreeSource` + the three S3 stores, and owns the **cleanup split**
+  (the durable shadow worktree root — worktrees **and** identity sidecars — is
   **not** disposed with `DisposableShadowRoot` and is **never** removed by S3).
 - `infrastructure/disposable-shadow-root.ts` — **stops parenting the shadow
   worktrees**. `DisposableShadowRoot` keeps only the disposable **auth**
@@ -284,9 +338,9 @@ filesystem removal, no Orca-core change; authority stays `AICONTROL_NATIVE`.
 | Settled Dispatch | A bound shadow Dispatch that ORCA-S2 recorded as `settlement_observation.status ∈ {observed, observed_conflicted}`. S3 only ever acts on these. |
 | Worktree provenance | `{ baseCommit, candidateHead, filesChanged, provenanceSource, provenanceDigest }` for one settled Dispatch. Advisory. |
 | `provenanceSource` | `converged_from_worktree` \| `synchronous_capture`. Records *how* the row's facts were obtained. There is **no** `unresolved` value and **no** sentinel row — an unresolved case is incident-only (§7.1). |
-| Worktree identity discriminator | `{ correlationId, orcaRunId, orcaDispatchId, worktreeNonce }` — Execution-minted at bind time, written **into the shadow worktree** at `<worktree>/.git/orca-provenance-identity.json` (inside `.git/`, so never in any `git diff`) **and** persisted verbatim on the `dispatch_worktree` row. `worktreeNonce` is an immutable Execution-minted random id. Convergence requires the on-disk file to exist and **exactly equal** the `dispatch_worktree` row, which must itself match `run_binding`. `root_ref` / path / `git cat-file -e <base_commit>` are **corroborating evidence only**. |
+| Worktree identity discriminator | `{ correlationId, orcaRunId, orcaDispatchId, worktreeNonce }` (+ corroborating `sliceRef`, `worktreePath`) — Execution-minted at bind time, written to an **Execution-owned identity sidecar** at `<durableShadowWorktreeRoot>/identity/<orcaDispatchId>.json` — **outside Git administrative storage and outside the worktree** (portable across standalone and linked worktrees; a linked worktree's `.git` is a file, so a `<worktree>/.git/…` location would be wrong; and it can never surface in any `git add` / `git status` / `git diff`) — **and** persisted verbatim on the `dispatch_worktree` row. `worktreeNonce` is an immutable Execution-minted random id. Convergence requires the sidecar file to exist and its `{ correlationId, orcaRunId, orcaDispatchId, worktreeNonce }` to **exactly equal** the `dispatch_worktree` row, which must itself match `run_binding`'s correlation/run/dispatch identity. The sidecar's `worktreePath` is canonicalized and must resolve **inside** the configured durable shadow-worktree root. `root_ref` / path / `git cat-file -e <base_commit>` are **corroborating evidence only**. |
 | `DurableWorktreeSource` | Execution-owned read port: over a **read-only Git handle restricted to an exact argv whitelist** (§9), reads `HEAD`, corroborates `<base_commit>` object existence, and reads the `base_commit..HEAD` name-only diff. Plumbing reads only. |
-| `dispatch_worktree` | Execution-owned durable **SOURCE row** `(orca_dispatch_id → worktree_path, root_ref, correlation_id, orca_run_id, worktree_nonce, opened_at)`. Written **atomically with `run_binding`**. **Preserved** across provenance-projection rebuild, rollback, and restart. The only durable record of where the worktree is and which identity it must carry. |
+| `dispatch_worktree` | Execution-owned durable **SOURCE row** `(orca_dispatch_id → worktree_path, root_ref, correlation_id, orca_run_id, worktree_nonce, opened_at)`. The **row** is inserted in the **same SQLite transaction as `run_binding`** (§7.6 steps 4–5); the matching identity sidecar is written to the filesystem **before** that transaction (§7.6 step 2) — SQLite and filesystem writes are **not** one atomic commit. **Preserved** across provenance-projection rebuild, rollback, and restart. The only durable record of where the worktree is and which identity it must carry. |
 | Provenance sweep | `convergeWorktreeProvenance(sliceRef, now)` — a **sibling** two-phase scan (A: record new; B: re-verify recorded), invoked by the composition boundary **after** `reconcileShadowExecutionState(...)`. **Never a phase inside the ORCA-S2 coordinator.** |
 | Provenance incident | A `worktree_provenance_incident` row (S3's **own** table, **never** `settlement_incident`) with an S3 `kind`: `worktree_missing`, `worktree_dispatch_mismatch`, `provenance_snapshot_changed`. Its open-incident predicate gates **only** S3 convergence. |
 | Retryable convergence result | `WORKTREE_SOURCE_OPERATIONAL_RETRYABLE` (git timeout / IO / lock / spawn error), `WORKTREE_SOURCE_UNSTABLE_RETRYABLE` (double-read disagreed across the bounded budget), or `EXECUTION_STORE_BUSY_RETRYABLE` (write txn not acquired within the `SQLITE_BUSY` budget). **None** writes a durable row, raises an incident, or blocks the binding. All are surfaced in the report. |
@@ -299,8 +353,10 @@ filesystem removal, no Orca-core change; authority stays `AICONTROL_NATIVE`.
 - Execution store: `run_binding`, `run_reservation`, `settlement_observation`
   (ORCA-S2), and the new `dispatch_worktree` (SOURCE).
 - The dedicated **durable out-of-`DisposableShadowRoot` shadow** worktree on disk
-  for the bound dispatch, and its `<worktree>/.git/orca-provenance-identity.json`
-  discriminator file (Git plumbing + a single plain file read only).
+  for the bound dispatch, and the Execution-owned identity sidecar
+  `<durableShadowWorktreeRoot>/identity/<orcaDispatchId>.json` — **outside the
+  worktree and outside all Git administrative storage** (Git plumbing + a single
+  plain file read only).
 - `now()` clock; bounded retry budgets (spec constants, §11).
 
 **Outputs (all Execution-owned, advisory):**
@@ -338,8 +394,10 @@ filesystem removal, no Orca-core change; authority stays `AICONTROL_NATIVE`.
   `base_commit` / `candidate_head` / `files_changed_json` / `provenance_json`
   column is **immutable** after Phase A.
 - `dispatch_worktree: (absent) → present` — **only** at bind time, **in the same
-  Execution transaction as `run_binding`**, together with the on-disk
-  discriminator file.
+  Execution transaction as `run_binding`** (§7.6 steps 4–5). The identity sidecar
+  is written atomically to the filesystem (temp file + `rename`) **before** that
+  transaction opens (§7.6 step 2); SQLite and filesystem writes are **not** one
+  atomic commit.
 - `worktree_provenance_incident: (absent) → present (blocked=1)` — a stable
   semantic contradiction (§7.3). `evidence_digest` never overwritten; a genuinely
   different evidence snapshot is a new row.
@@ -429,23 +487,35 @@ dispatch_worktree (
   correlation_id    TEXT NOT NULL REFERENCES run_reservation(correlation_id),
   orca_run_id       TEXT NOT NULL,
   worktree_nonce    TEXT NOT NULL,     -- immutable Execution-minted random id
-  worktree_path     TEXT NOT NULL,     -- absolute; corroborating only
+  worktree_path     TEXT NOT NULL,     -- canonicalized absolute; must resolve inside the durable shadow-worktree root; corroborating only
   root_ref          TEXT NOT NULL,     -- which durable-shadow-worktree-root generation; corroborating only
   opened_at         TEXT NOT NULL
 )
 CREATE INDEX IF NOT EXISTS dispatch_worktree_by_correlation ON dispatch_worktree(correlation_id);
 ```
 
-- Written **once**, at bind time, **in the same `withImmediateTransaction` as
-  `store.recordBinding(binding)`** (`shadow-observation-service.ts` line 258).
-  The same step writes `<worktree_path>/.git/orca-provenance-identity.json` =
-  `{ correlationId, orcaRunId, orcaDispatchId, worktreeNonce, sliceRef }`
-  (inside `.git/`, so `git add -A` at workload time never stages it and it never
-  appears in any `base_commit..HEAD` diff).
-- **SOURCE state.** Preserved across provenance-projection rebuild, rollback, and
-  restart (§7.5, §15). It is the **only** durable record of the worktree path and
-  the identity the worktree must carry; it is **not** re-derivable from any other
-  durable state, so it is **never dropped**.
+- The **row** is written **once**, at bind time, **in the same
+  `withImmediateTransaction` as `store.recordBinding(binding)`**
+  (`shadow-observation-service.ts` line 258) — §7.6 steps 4–5, one SQLite
+  transaction.
+- The matching **identity sidecar** is written **before** that transaction
+  (§7.6 step 2): `<durableShadowWorktreeRoot>/identity/<orcaDispatchId>.json` =
+  `{ correlationId, orcaRunId, orcaDispatchId, worktreeNonce, sliceRef,
+  worktreePath }`, written atomically (temp file + `rename` within the **same
+  durable root**). It lives **outside `<worktree>/.git/`, outside the worktree,
+  and outside all Git administrative storage** — portable across standalone and
+  linked worktrees (a linked worktree's `.git` is a *file*, and its admin dir is
+  under the parent repo's `.git/worktrees/<name>/`), and structurally incapable
+  of appearing in any `git add`, `git status`, or `base_commit..HEAD` diff.
+  Writing it requires **no Git command and no Git mutation**.
+- `worktree_path` is stored **canonicalized** and must resolve **inside** the
+  configured durable shadow-worktree root; a sidecar or row whose `worktreePath`
+  canonicalizes outside that root fails the identity check.
+- **SOURCE state.** The row **and** the identity sidecar are preserved across
+  provenance-projection rebuild, rollback, and restart (§7.5, §15). Together they
+  are the **only** durable record of the worktree path and the identity the
+  worktree must carry; neither is re-derivable from any other durable state, so
+  neither is **ever dropped** or reconstructed heuristically.
 - `worktree_path` / `root_ref` are **corroborating evidence only** — a durable
   identity check is the `worktree_nonce` + id triple match (§8, §12 PROV-3),
   never a path comparison.
@@ -547,6 +617,50 @@ with `run_binding.base_commit`, raise `worktree_dispatch_mismatch`
   metadata (`observed_at`, `first_seen_at`, `conflicted_at`, `worktree_path_ref`,
   incident `id`, `raised_at`) is **excluded** from the comparison.
 
+### 7.6 Bind-time write ordering & crash windows (DB ↔ filesystem — C2)
+
+**SQLite and filesystem writes are NOT atomically committed together.** The bind
+step touches three independent durable media — the worktree directory, the
+identity sidecar file, and the Execution SQLite store — and no mechanism commits
+them as one unit. The ordering is therefore **pinned** so that every partial
+outcome is safe and convergence never fabricates:
+
+1. **create** the durable shadow worktree (out-of-`DisposableShadowRoot`, §10);
+2. **atomically write** the Execution-owned identity sidecar
+   `<durableShadowWorktreeRoot>/identity/<orcaDispatchId>.json` — temp file +
+   `rename` within the **same durable root** (no Git command);
+3. `BEGIN IMMEDIATE`;
+4. `INSERT run_binding` (via `store.recordBinding(binding)`);
+5. `INSERT dispatch_worktree`;
+6. `COMMIT`.
+
+Steps 4–5 are **one** SQLite transaction. The sidecar (step 2) is written
+**before** that transaction opens.
+
+**Required invariant — the only direction that holds:** a **committed
+`dispatch_worktree` row ⇒ the identity sidecar was successfully written before
+the DB commit.** The reverse is **not** claimed — a sidecar present on disk does
+**not** imply a committed `dispatch_worktree` row.
+
+**Crash windows:**
+
+| # | Crash point | Durable DB state | Filesystem state | S3 behaviour |
+| --- | --- | --- | --- | --- |
+| **A** | after worktree creation, before the sidecar (step 1→2) | no `run_binding`, no `dispatch_worktree` | orphan worktree, no sidecar | S3 **does not act** (no source rows); orphan-worktree cleanup **deferred** to a later lifecycle slice — **not S3**. |
+| **B** | after the sidecar, before the DB transaction (step 2→3) | no `run_binding`, no `dispatch_worktree` | orphan worktree **+ orphan sidecar** | S3 **does not act**; orphan worktree + sidecar cleanup **deferred** — **not S3**. |
+| **C** | during the transaction, before `COMMIT` (steps 3–5) | `run_binding` **and** `dispatch_worktree` both roll back / absent | orphan worktree + sidecar | S3 **does not act**; orphan filesystem state cleanup **deferred** — **not S3**. |
+| **D** | after `COMMIT` (step 6+) | committed `run_binding` **+** `dispatch_worktree` | worktree + previously-written sidecar present | **restart-safe normal convergence** — the next sibling sweep resolves identity and records provenance exactly once. |
+| **E** | any time after commit, then the sidecar later goes **missing or corrupt** | committed `dispatch_worktree` | sidecar absent / unparseable / not exactly equal to the row | `worktree_dispatch_mismatch` (`identity_discriminator_absent` / `identity_discriminator_mismatch`); **S3 provenance blocked for this binding only**; **no `worktree_provenance` row**; **no reconstruction, no fabricated SHA**. ORCA-S1 / ORCA-S2 sweeps unaffected. |
+| **F** | `run_binding` exists but `dispatch_worktree` is **absent** — legacy / pre-S3 bind shape (never the crash-C partial, which rolls back both) | `run_binding` only | any | `worktree_dispatch_mismatch` (`dispatch_worktree_row_absent`); **no row**; **no heuristic reconstruction** of the missing source row. |
+
+Windows **A–C** leave **orphan filesystem state and no DB source rows**;
+`convergeWorktreeProvenance` reads `dispatch_worktree` + `settlement_observation`
+and simply finds nothing to do. **Orphan worktree / sidecar cleanup after an
+aborted bind is not owned by S3** — this slice adds **no** `rm` / `rmSync` /
+`rmdir` / `unlink` / `git worktree remove` / directory or file deletion on any
+path (§6 forbidden, §10, §12 PROV-6). Governed cleanup is deferred to a later
+lifecycle / delegation-preparation slice.
+
 ## 8. Convergence design — sibling two-phase sweep (mirrors ORCA-S2 §8)
 
 `convergeWorktreeProvenance(sliceRef, now)` is invoked by the composition
@@ -565,16 +679,22 @@ shadow worktree filesystem, and writes **only** `worktree_provenance`,
 1. **Resolve** the `dispatch_worktree` row for `binding.orca_dispatch_id` (never
    heuristically from logs — §L). Row absent → `worktree_dispatch_mismatch`
    (`failedCheck = dispatch_worktree_row_absent`), no row, return.
-2. **Verify identity first, before any provenance read.** Read
-   `<worktree_path>/.git/orca-provenance-identity.json` (a plain file read; no
-   git). File absent → `worktree_dispatch_mismatch`
+2. **Verify identity first, before any provenance read.** Read the
+   Execution-owned identity sidecar
+   `<durableShadowWorktreeRoot>/identity/<orcaDispatchId>.json` (a plain file
+   read; **no git** — the path is derived from the durable root + the
+   `dispatch_worktree` row's `orca_dispatch_id`, never from Git administrative
+   storage). File absent or unparseable/corrupt → `worktree_dispatch_mismatch`
    (`identity_discriminator_absent`), no row, return. Parse and require
    `{ correlationId, orcaRunId, orcaDispatchId, worktreeNonce }` to **exactly
    equal** the `dispatch_worktree` row, which must itself equal
    `run_binding.{correlationId, orcaRunId, orcaDispatchId}`. Any inequality →
    `worktree_dispatch_mismatch` (`identity_discriminator_mismatch`), no row,
-   return. `root_ref` / `worktree_path` / base-object existence are checked only
-   as corroboration and never on their own establish or deny identity.
+   return. Additionally require the sidecar's canonicalized `worktreePath` to
+   resolve **inside** the configured durable shadow-worktree root; a path that
+   canonicalizes outside the root is an `identity_discriminator_mismatch`.
+   `root_ref` / `worktree_path` / base-object existence are checked only as
+   corroboration and never on their own establish or deny identity.
 3. Through `DurableWorktreeSource` (§9), over the **exact argv whitelist**:
    `git rev-parse HEAD`; `git cat-file -e <run_binding.base_commit>^{commit}`
    (corroboration); `git diff --name-only <run_binding.base_commit>..HEAD`.
@@ -648,14 +768,15 @@ DurableWorktreeSource {
     boundDispatchId: string
     boundRunId: string
     boundBaseCommit: string
-    worktreePath: string
+    worktreePath: string          // canonicalized; must resolve inside the durable shadow-worktree root
+    identitySidecarPath: string   // <durableShadowWorktreeRoot>/identity/<orcaDispatchId>.json — outside .git/, outside the worktree
     expectedIdentity: { correlationId: string; orcaRunId: string;
                         orcaDispatchId: string; worktreeNonce: string }
   }): DurableWorktreeRead
 }
 
 type DurableWorktreeRead =
-  | { kind: 'identity_absent' }                                // .git discriminator file missing
+  | { kind: 'identity_absent' }                                // identity sidecar missing or corrupt
   | { kind: 'identity_mismatch'; observedIdentityDigest: string }
   | { kind: 'missing' }                                        // confirmed non-repository / dir absent
   | { kind: 'operational_error'; detail: string }              // timeout / IO / lock / spawn / non-classifiable nonzero
@@ -667,8 +788,12 @@ type DurableWorktreeRead =
 
 **Adapter (infrastructure, Execution-owned):** `ReadOnlyWorktreeProvenanceSource`.
 
-- Reads the identity discriminator with a plain `readFileSync` of
-  `<worktreePath>/.git/orca-provenance-identity.json` — **no** git for identity.
+- Reads the identity discriminator with a plain `readFileSync` of the
+  Execution-owned identity sidecar `identitySidecarPath`
+  (`<durableShadowWorktreeRoot>/identity/<orcaDispatchId>.json`) — **outside
+  `.git/` and outside the worktree**, so identity is read with **no** Git
+  invocation and works identically for standalone and linked worktrees. A missing
+  or unparseable file → `{ kind: 'identity_absent' }`.
 - Invokes `git` **only** through the existing `runProcess` / `runProcessSync`
   (`src/shared/child-process/`, per AGENTS.md) with `cwd = worktreePath`, and
   **only** these four argv forms — an **exact whitelist**, no "or equivalent":
@@ -706,12 +831,16 @@ moving the durable `orchestration.db` out of that root (S2 §17).
   resolves and persists the canonical absolute durable shadow worktree root path
   in `execution_meta` (mirroring `durable-shadow-orchestration-path.ts`), failing
   closed on a configured-vs-persisted mismatch. `shadow-identity-observation.ts`
-  routes `worktreeDirFor('shadow', …)` under this root.
+  routes `worktreeDirFor('shadow', …)` under this root. The `<root>/identity/`
+  subtree holds the Execution-owned identity sidecars (§7.2, §7.6) — SOURCE
+  state, written before the DB transaction, never removed by S3, never disposed
+  with `DisposableShadowRoot`.
 - `DisposableShadowRoot` keeps **only** the disposable `'auth'` worktrees (never
   read after the run). Its `cleanup()` (`rmSync` of its own tree) **must never
-  reach** the durable shadow worktree root.
+  reach** the durable shadow worktree root (worktrees **or** identity sidecars).
 - **S3 performs no filesystem removal** (§6 forbidden; §12 PROV-6) and does
-  **not** decide when the durable shadow worktree is deleted.
+  **not** decide when the durable shadow worktree, its identity sidecar, or any
+  orphan bind state (§7.6 windows A–C) is deleted.
 - Governed cleanup / finalization / reaping of the durable shadow worktree root
   is **explicitly deferred** to a later lifecycle / delegation-preparation slice
   (provisionally **ORCA-S4 — Delegated Side-Effect Boundary Enumeration & Shadow
@@ -730,7 +859,8 @@ moving the durable `orchestration.db` out of that root (S2 §17).
 | No `settlement_observation` for the binding yet | Skipped this pass — S3 only acts after ORCA-S2 converged settlement. |
 | Open `worktree_provenance_incident` for the binding (`resolved_at IS NULL`) | Skipped in both phases — S3-only block. ORCA-S2 / ORCA-S1 sweeps are **unaffected**. |
 | `dispatch_worktree` row absent | `worktree_dispatch_mismatch` (`dispatch_worktree_row_absent`); `blocked`; **no row**. |
-| Identity discriminator file absent / not exactly equal to the `dispatch_worktree` row (and `run_binding`) | `worktree_dispatch_mismatch` (`identity_discriminator_absent` / `identity_discriminator_mismatch`); `blocked`; **no row**. |
+| Identity sidecar (`<durableShadowWorktreeRoot>/identity/<orcaDispatchId>.json`) absent / corrupt / not exactly equal to the `dispatch_worktree` row (and `run_binding`), or its canonicalized `worktreePath` resolves outside the durable root | `worktree_dispatch_mismatch` (`identity_discriminator_absent` / `identity_discriminator_mismatch`); `blocked`; **no row**. |
+| `run_binding` committed but `dispatch_worktree` never committed | **Impossible** — §7.6 steps 4–5 are one SQLite transaction (crash window C rolls back both). |
 | Identity OK; path is a **confirmed non-repository** / directory absent | `worktree_missing`; `blocked`; **no row**; **no fabricated SHA** (§F.7 analogue). |
 | Identity OK; `git` timed out / IO / lock / spawn / non-classifiable error | **`WORKTREE_SOURCE_OPERATIONAL_RETRYABLE`** — no row, **no incident**, not blocked; surfaced in the report; retried next sweep. |
 | Identity OK; double-read disagreed and stayed unstable across the budget | **`WORKTREE_SOURCE_UNSTABLE_RETRYABLE`** — no row, no incident, not blocked. |
@@ -756,12 +886,20 @@ moving the durable `orchestration.db` out of that root (S2 §17).
   path prefix** are excluded from every digest, dedup key, and
   replay-equivalence check.
 - **PROV-3 — identity binding.** Convergence reads provenance **only** after the
-  on-disk discriminator `{ correlationId, orcaRunId, orcaDispatchId,
-  worktreeNonce }` exactly equals the `dispatch_worktree` row, which exactly
-  equals `run_binding`. `root_ref` / `worktree_path` /
-  `git cat-file -e <base_commit>` are **corroborating evidence only**. Absence or
-  mismatch ⇒ `worktree_dispatch_mismatch`, **no row**. `run_binding` is never
-  reconstructed heuristically (§L; ORCA-S1 I4; ORCA-S2 P-S2-3).
+  **Execution-owned identity sidecar**
+  (`<durableShadowWorktreeRoot>/identity/<orcaDispatchId>.json` — outside
+  `<worktree>/.git/`, outside the worktree, outside all Git administrative
+  storage; portable across standalone and linked worktrees)
+  `{ correlationId, orcaRunId, orcaDispatchId, worktreeNonce }` exactly equals
+  the `dispatch_worktree` row, which exactly equals `run_binding`'s
+  correlation/run/dispatch identity, **and** the sidecar's canonicalized
+  `worktreePath` resolves inside the configured durable shadow-worktree root.
+  `root_ref` / `worktree_path` / `git cat-file -e <base_commit>` are
+  **corroborating evidence only** — never identity on their own. Sidecar absence,
+  corruption, or mismatch against a **committed** `dispatch_worktree` row ⇒
+  `worktree_dispatch_mismatch`, **no row**. Neither `run_binding`,
+  `dispatch_worktree`, nor the identity sidecar is ever reconstructed
+  heuristically (§L; ORCA-S1 I4; ORCA-S2 P-S2-3).
 - **PROV-4 — advisory only / zero authority movement.** No `data/app.db` write;
   no `finalizeRunOnce` (any mode); no `agent_runs` write; no client signal; no
   `parity_observation` write / column / comparison; no `settlement_incident`
@@ -777,15 +915,20 @@ moving the durable `orchestration.db` out of that root (S2 §17).
   `-c core.fsmonitor=false rev-parse --is-inside-work-tree`. No `checkout`,
   `reset`, `commit`, `add`, `fetch`, `gc`, `config` write, ref/branch update, or
   index write. The worktree's `HEAD`, `.git/index` mtime, and loose+packed
-  object count are unchanged across a full sweep. (The `.git/orca-provenance-identity.json`
-  discriminator is written **once at bind time**, not by the sweep.)
+  object count are unchanged across a full sweep. The identity sidecar
+  (`<durableShadowWorktreeRoot>/identity/<orcaDispatchId>.json`, outside `.git/`
+  and outside the worktree) is written **once at bind time with no Git command**,
+  never by the sweep; the sweep only ever reads it.
 - **PROV-6 — observation, not ownership; no filesystem removal.** S3 performs
   **no** teardown, process-tree kill, worktree-finalization *ownership*, reap
   timing, execution-attempt identity closure, terminal-event emission, **and no
   `rm` / `rmSync` / `rmdir` / `unlink` / `git worktree remove` / directory
   deletion on any code path**. It only records artifacts Orca's shadow plane
-  already produced. The durable shadow worktree root's lifetime is owned by a
-  future lifecycle slice — **not** S3, **not** `DisposableShadowRoot`.
+  already produced. This includes **orphan worktree / identity-sidecar state left
+  by a bind that crashed before `COMMIT`** (§7.6 windows A–C): S3 does not delete
+  or reap it. The durable shadow worktree root's lifetime — worktrees, identity
+  sidecars, and orphan bind state alike — is owned by a future lifecycle slice —
+  **not** S3, **not** `DisposableShadowRoot`.
 - **PROV-7 — no parity responsibility.** S3 does **not** restore, compute, or
   persist any `files_changed` parity comparison; does **not** read, write, or add
   a column to `parity_observation`; does **not** reopen ORCA-S1 gate 8; does
@@ -804,9 +947,16 @@ moving the durable `orchestration.db` out of that root (S2 §17).
   `convergeSettlements` Phase A, `convergeSettlements` Phase B, or
   `reconcileIncompleteReservations` abandon semantics. `settlement_incident` is
   never written, altered, queried, or schema-changed by S3.
-- **PROV-11 — source-state durability.** `dispatch_worktree` and the durable
-  shadow worktree root are SOURCE state: written atomically with `run_binding`
-  and preserved across provenance-projection rebuild, rollback, and restart. Only
+- **PROV-11 — source-state durability + crash consistency.**
+  `dispatch_worktree`, the identity sidecar, and the durable shadow worktree root
+  are SOURCE state, preserved across provenance-projection rebuild, rollback, and
+  restart. The `dispatch_worktree` **row** is inserted in the **same SQLite
+  transaction** as `run_binding` (§7.6 steps 4–5); the identity **sidecar** is
+  written atomically to the filesystem **before** that transaction (§7.6 step 2).
+  **SQLite and filesystem writes are NOT a single atomic commit**, and the only
+  guaranteed direction is *committed `dispatch_worktree` ⇒ sidecar already
+  written* — never the reverse. Crash windows A–F are enumerated in §7.6; orphan
+  filesystem state from windows A–C is **not** cleaned up by S3. Only
   `worktree_provenance` and `worktree_provenance_incident` are
   projection-rebuildable.
 
@@ -828,8 +978,10 @@ moving the durable `orchestration.db` out of that root (S2 §17).
   teardown, process-tree teardown, *ownership* of worktree finalization, reap
   timing, `rm` / `rmSync` / `git worktree remove`, execution-attempt identity
   closure, terminal-event emission, the `data/app.db` client completion signal.
-  Governed cleanup of the durable shadow worktree root → a later slice
-  (provisionally **ORCA-S4**) or the `ORCA_DELEGATED` slice's mandatory §H
+  This explicitly includes **orphan worktree / identity-sidecar state from a bind
+  that crashed before `COMMIT`** (§7.6 windows A–C) — S3 adds no deletion or
+  reaping for it. Governed cleanup of the durable shadow worktree root → a later
+  slice (provisionally **ORCA-S4**) or the `ORCA_DELEGATED` slice's mandatory §H
   enumeration (B4).
 - **Any authority transfer / cutover** (`ORCA_DELEGATED` / `ORCA_AUTHORITATIVE`);
   any `data/app.db` projection of terminal state or Git artifacts; any
@@ -862,8 +1014,8 @@ moving the durable `orchestration.db` out of that root (S2 §17).
    write / column / schema change anywhere**; **no `parity_observation` read /
    write / column anywhere**; **`reconcile-shadow-execution-state.ts` and
    `orca-execution-plane.ts` byte-unchanged**.
-3. **TDD / RED evidence** — for PROV-1..PROV-11 and each crash window, a failing
-   test captured **before** the behaviour it checks. Evidence:
+3. **TDD / RED evidence** — for PROV-1..PROV-11 and each §7.6 crash window
+   (A–F), a failing test captured **before** the behaviour it checks. Evidence:
    `slices/durable-worktree-provenance/RED-EVIDENCE.md`.
 4. **Zero authoritative writes** — call-site audit + runtime test: the whole
    slice writes nothing to `data/app.db` (SHA-256 unchanged, no sidecars),
@@ -896,23 +1048,33 @@ moving the durable `orchestration.db` out of that root (S2 §17).
    provenance row exists; the next Phase B raises exactly one
    `provenance_snapshot_changed` incident, sets `status='conflicted'`, and leaves
    every artifact column byte-unchanged.
-10. **Restart safety** — a separate-child-process harness (ORCA-S2 pattern): the
-    child durably settles + writes `dispatch_worktree` + the discriminator,
-    checkpoints/closes, is `SIGKILL`ed at defined windows; the parent's fresh
-    sibling sweep reaches exactly-once provenance and never a fabricated commit.
-    A window where `run_binding` is written but the crash precedes the same
-    transaction's `dispatch_worktree` insert is impossible (single transaction);
-    a window after both, before convergence, converges normally.
+10. **Restart safety / crash windows (§7.6 A–F)** — a separate-child-process
+    harness (ORCA-S2 pattern): the child creates the durable worktree, writes the
+    identity sidecar (temp + `rename`), then commits `run_binding` +
+    `dispatch_worktree` in one transaction, checkpoints/closes, and is
+    `SIGKILL`ed at each §7.6 window. Prove: windows **A–C** leave orphan
+    filesystem state, no DB source rows, and no S3 action (and S3 performs **no**
+    cleanup of that orphan state); window **D** converges normally; window **E**
+    (sidecar later missing/corrupt over a committed `dispatch_worktree`) →
+    `worktree_dispatch_mismatch`, no row, no reconstruction; window **F**
+    (`run_binding` without `dispatch_worktree`) → `worktree_dispatch_mismatch`
+    (`dispatch_worktree_row_absent`), no heuristic reconstruction. A window where
+    `run_binding` is committed but `dispatch_worktree` is not is **impossible**
+    (§7.6 steps 4–5 are one transaction). Never a fabricated commit on any path.
 11. **No fabrication under loss** — make the worktree a confirmed non-repository
     (or delete the directory) before convergence: `worktree_missing` incident,
     `blocked`, **no `worktree_provenance` row**, **no synthesized SHA**, binding
     surfaced not silently dropped. And: induce a git **timeout / lock / IO**
     error → `WORKTREE_SOURCE_OPERATIONAL_RETRYABLE`, **never** `worktree_missing`.
-12. **Identity** — a worktree whose `.git/orca-provenance-identity.json` is
-    absent, or carries a different `{ correlationId, orcaRunId, orcaDispatchId,
-    worktreeNonce }`, or a binding whose `dispatch_worktree` row is absent →
+12. **Identity** — a binding whose identity sidecar
+    `<durableShadowWorktreeRoot>/identity/<orcaDispatchId>.json` is absent or
+    corrupt, or carries a different `{ correlationId, orcaRunId, orcaDispatchId,
+    worktreeNonce }`, or whose sidecar `worktreePath` canonicalizes **outside**
+    the durable root, or whose `dispatch_worktree` row is absent →
     `worktree_dispatch_mismatch` and **no row** (PROV-3). A reused/copied
-    filesystem path with the wrong discriminator does **not** converge.
+    filesystem path with the wrong (or no) sidecar does **not** converge. The
+    check behaves identically for a standalone worktree and a **linked** worktree
+    (whose `.git` is a file) — the sidecar is never inside Git admin storage.
 13. **Incident isolation + no parity** — prove an open
     `worktree_provenance_incident` does **not** block `convergeSettlements`
     Phase A, `convergeSettlements` Phase B, or `reconcileIncompleteReservations`;
@@ -926,12 +1088,17 @@ moving the durable `orchestration.db` out of that root (S2 §17).
     core file changed; `reconcile-shadow-execution-state.ts` and
     `orca-execution-plane.ts` byte-unchanged; the `dispatch_worktree` write is at
     the `recordBinding` seam.
-16. **Source-state durability** — a provenance-projection rebuild **and** a
-    rollback each preserve `dispatch_worktree`, `run_binding`, `run_reservation`,
-    `execution_meta` (incl. the durable shadow worktree root key), and the
-    durable shadow worktree files; only `worktree_provenance` +
-    `worktree_provenance_incident` are dropped/recreated; a fresh sweep after
-    rebuild reproduces semantically equivalent rows (PROV-11).
+16. **Source-state durability + crash consistency** — a provenance-projection
+    rebuild **and** a rollback each preserve `dispatch_worktree`, the identity
+    sidecars, `run_binding`, `run_reservation`, `execution_meta` (incl. the
+    durable shadow worktree root key), and the durable shadow worktree files;
+    only `worktree_provenance` + `worktree_provenance_incident` are
+    dropped/recreated; a fresh sweep after rebuild reproduces semantically
+    equivalent rows (PROV-11). A test asserts the §7.6 bind ordering — sidecar
+    (atomic temp + `rename`) **before** `BEGIN IMMEDIATE`, `run_binding` +
+    `dispatch_worktree` in one transaction — and that a committed
+    `dispatch_worktree` row always has a pre-existing sidecar (never the
+    reverse).
 17. **Retryable taxonomy** — tests induce each of
     `WORKTREE_SOURCE_OPERATIONAL_RETRYABLE`,
     `WORKTREE_SOURCE_UNSTABLE_RETRYABLE`, `EXECUTION_STORE_BUSY_RETRYABLE` and
@@ -945,10 +1112,12 @@ Advisory + additive. To roll back: stop the composition boundary from invoking
 site); drop **only** `worktree_provenance` and `worktree_provenance_incident` (or
 leave them — inert).
 
-- **`dispatch_worktree` and the durable shadow worktree files are SOURCE state —
-  NEVER deleted by rollback.** They may be retained and removed only by an
-  explicit later governed cleanup procedure (a lifecycle / delegation-preparation
-  slice), never by S3, never automatically.
+- **`dispatch_worktree`, the identity sidecars
+  (`<durableShadowWorktreeRoot>/identity/`), and the durable shadow worktree
+  files are SOURCE state — NEVER deleted by rollback**, and neither is any orphan
+  worktree/sidecar state from an aborted bind (§7.6 windows A–C). They may be
+  retained and removed only by an explicit later governed cleanup procedure (a
+  lifecycle / delegation-preparation slice), never by S3, never automatically.
 - `run_binding.candidate_head` values written on the durable path are correct
   facts and may be left in place or nulled by an explicit governed procedure.
 - `data/app.db`, `orchestration.db`, and `settlement_incident` were **never**
@@ -1020,11 +1189,14 @@ modification); the `parity.ts` comparator / gate-8 (no parity work — B5).
    `hasOpenWorktreeProvenanceIncident` ever consulted outside
    `convergeWorktreeProvenance`? Is `settlement_incident` ever written/altered by
    S3?
-3. **Worktree identity (B2)** — seed a worktree at the recorded path with a
-   **different** `.git/orca-provenance-identity.json`, or delete the file, or a
-   copied/relocated tmp path; confirm `worktree_dispatch_mismatch` and **no
+3. **Worktree identity (B2 / C1)** — seed a **different** identity sidecar at
+   `<durableShadowWorktreeRoot>/identity/<orcaDispatchId>.json`, or delete /
+   corrupt it, or point its `worktreePath` outside the durable root, or use a
+   copied/relocated tmp worktree; confirm `worktree_dispatch_mismatch` and **no
    row**. Can a path-only or `root_ref`-only match ever converge? Can
-   `git cat-file -e <base_commit>` success alone converge?
+   `git cat-file -e <base_commit>` success alone converge? Is the discriminator
+   ever read from inside `<worktree>/.git/` or any Git admin dir? Does the check
+   behave identically for a **linked** worktree (whose `.git` is a file)?
 4. **Fabrication under loss (PROV-1)** — can `worktree_missing` /
    `worktree_dispatch_mismatch` be coerced into writing a `worktree_provenance`
    with a synthesized `candidate_head` (empty-tree SHA, `base_commit` copied as
@@ -1033,10 +1205,15 @@ modification); the `parity.ts` comparator / gate-8 (no parity work — B5).
    IO error; confirm `WORKTREE_SOURCE_OPERATIONAL_RETRYABLE` (no incident, no
    block), **never** `worktree_missing`. Only a confirmed non-repository /
    absent directory is `worktree_missing`.
-6. **Source-state durability (B3 / PROV-11)** — does a provenance-projection
-   rebuild or rollback ever drop `dispatch_worktree` or delete the worktree
-   files? Is `dispatch_worktree` written in the **same transaction** as
-   `run_binding`?
+6. **Source-state durability + crash consistency (B3 / C2 / PROV-11)** — does a
+   provenance-projection rebuild or rollback ever drop `dispatch_worktree`, the
+   identity sidecars, or delete the worktree files? Is `dispatch_worktree`
+   written in the **same transaction** as `run_binding`, with the sidecar written
+   (atomically, temp + `rename`) **before** that transaction? Walk §7.6 windows
+   A–F: is any partial outcome unsafe, does S3 ever act on an orphan, and does S3
+   ever delete/reap orphan filesystem state (it must not)? Is the invariant
+   *committed `dispatch_worktree` ⇒ sidecar already written* actually guaranteed,
+   and is the reverse never assumed?
 7. **No "phase 2.5" (R7)** — is `reconcile-shadow-execution-state.ts`
    byte-unchanged? Is `convergeWorktreeProvenance` invoked strictly **after**
    `reconcileShadowExecutionState(...)` and never from inside it?
@@ -1067,4 +1244,4 @@ modification); the `parity.ts` comparator / gate-8 (no parity work — B5).
 
 _State class: `ARCHITECTURE_DEFINITION_READY` (candidate — not frozen, not
 independently accepted, not published)._
-_Display verdict: `MAESTRO_ORCA_S3_ARCHITECTURE_CORRECTED_READY_FOR_FOCUSED_REREVIEW`._
+_Display verdict: `MAESTRO_ORCA_S3_ARCHITECTURE_SECOND_CORRECTION_READY_FOR_FOCUSED_REREVIEW`._

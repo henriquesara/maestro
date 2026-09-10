@@ -1,0 +1,88 @@
+{
+  "sliceRef": "ORCA-S2-durable-settlement-observation",
+  "sampleN": 3,
+  "authorityBefore": "AICONTROL_NATIVE",
+  "authorityAfter": "AICONTROL_NATIVE",
+  "orcaModeBefore": "ORCA_SHADOW_ADVISORY",
+  "orcaModeAfter": "ORCA_SHADOW_ADVISORY",
+  "coupling": "EXECUTION_OWNED_SCHEMA_COUPLED_READER",
+  "convergence": {
+    "scannedPhaseA": 3,
+    "scannedPhaseB": 3,
+    "observed": [
+      {
+        "correlationId": "orca_s2_frozen_cancelled",
+        "orcaDispatchId": "ctx_099fd58b67c4",
+        "sourceDigest": "2ae904850baaa719cf7eac8c53428e4058cf5bbd5f668cd4bbcc66eb288ee381"
+      },
+      {
+        "correlationId": "orca_s2_frozen_completed",
+        "orcaDispatchId": "ctx_6db9f0a01c05",
+        "sourceDigest": "73484f6060c32e3e8aa6aefb984c33ef18713bc8555cd4b3edb09defc8677d70"
+      },
+      {
+        "correlationId": "orca_s2_frozen_failed",
+        "orcaDispatchId": "ctx_f10c4075d84e",
+        "sourceDigest": "37f27ec2ed92efcbf8a0984af7693af4fd5a16ac2c8374a5b9f27cf5d6559c8c"
+      }
+    ],
+    "conflicted": [],
+    "incidents": [],
+    "noop": 3,
+    "retryable": [],
+    "sweepErrors": []
+  },
+  "sourceGuard": {
+    "openedReadonly": true,
+    "ddlIssued": 0,
+    "pragmaJournalMutations": 0,
+    "triggersCreated": 0,
+    "metadataWrites": 0,
+    "sidecarsCreatedByS2": 0
+  },
+  "observations": [
+    {
+      "correlationId": "orca_s2_frozen_completed",
+      "orcaDispatchId": "ctx_6db9f0a01c05",
+      "status": "observed",
+      "sourceDigest": "73484f6060c32e3e8aa6aefb984c33ef18713bc8555cd4b3edb09defc8677d70",
+      "observedOutcome": {
+        "terminalOutcome": "completed",
+        "exitDisposition": "zero_exit",
+        "cancellation": "not_cancelled"
+      },
+      "provenanceComplete": true
+    },
+    {
+      "correlationId": "orca_s2_frozen_failed",
+      "orcaDispatchId": "ctx_f10c4075d84e",
+      "status": "observed",
+      "sourceDigest": "37f27ec2ed92efcbf8a0984af7693af4fd5a16ac2c8374a5b9f27cf5d6559c8c",
+      "observedOutcome": {
+        "terminalOutcome": "failed",
+        "exitDisposition": "non_zero_exit",
+        "cancellation": "not_cancelled"
+      },
+      "provenanceComplete": true
+    },
+    {
+      "correlationId": "orca_s2_frozen_cancelled",
+      "orcaDispatchId": "ctx_099fd58b67c4",
+      "status": "observed",
+      "sourceDigest": "2ae904850baaa719cf7eac8c53428e4058cf5bbd5f668cd4bbcc66eb288ee381",
+      "observedOutcome": {
+        "terminalOutcome": "cancelled",
+        "exitDisposition": "no_exit",
+        "cancellation": "cancelled"
+      },
+      "provenanceComplete": true
+    }
+  ],
+  "dbGuard": {
+    "aicontrolDbSha256Before": "9585ed9b9495a2ad5bd92b6f941479185d62f6d3a934e74a6d296495d231a81b",
+    "aicontrolDbSha256After": "9585ed9b9495a2ad5bd92b6f941479185d62f6d3a934e74a6d296495d231a81b",
+    "sidecarsAfter": false,
+    "unchanged": true
+  },
+  "parityObservationsWrittenByS2": 0
+}

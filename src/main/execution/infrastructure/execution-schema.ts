@@ -4,8 +4,13 @@ import type SyncDatabase from '../../sqlite/sync-database'
 // Standalone from every other schema in the fork. run_reservation /
 // run_binding / parity_observation / workload_exclusion belong to this context
 // (amendment §L, §P.13; run_reservation added by amendment 001 §5 / blocker B2).
+//
+// ORCA-S2 (§11): schema v2 → v3 — NEW TABLES ONLY (settlement_observation,
+// settlement_incident). No column added to any ORCA-S1 table. The versioned
+// upgrade ladder (version compare + explicit bump) is defined now even though v3
+// needs no ALTER, so a later v4 has a real ladder to extend.
 
-export const EXECUTION_SCHEMA_VERSION = 2
+export const EXECUTION_SCHEMA_VERSION = 3
 
 const CREATE_SQL = `
 CREATE TABLE IF NOT EXISTS run_reservation (
@@ -74,14 +79,89 @@ CREATE TABLE IF NOT EXISTS execution_meta (
 );
 `
 
-export function migrateExecutionStore(db: SyncDatabase): void {
-  db.exec(CREATE_SQL)
+/**
+ * ORCA-S2 v3 — the two new tables + indexes (§11.1). Kept as a separate constant
+ * so the settlement-projection rebuild (§17) recreates EXACTLY the same shape it
+ * drops — one source of truth, no drift.
+ */
+export const SETTLEMENT_PROJECTION_SQL = `
+CREATE TABLE IF NOT EXISTS settlement_observation (
+  correlation_id               TEXT PRIMARY KEY REFERENCES run_reservation(correlation_id),
+  orca_dispatch_id             TEXT NOT NULL,
+  orca_run_id                  TEXT NOT NULL,
+  org_task_id                  TEXT NOT NULL,
+  slice_ref                    TEXT NOT NULL,
+  status                       TEXT NOT NULL DEFAULT 'observed',
+  source_dispatch_status       TEXT NOT NULL,
+  source_dispatch_completed_at TEXT,
+  source_task_status           TEXT NOT NULL,
+  source_task_completed_at     TEXT,
+  source_digest                TEXT NOT NULL,
+  observed_outcome_json        TEXT NOT NULL,
+  provenance_json              TEXT NOT NULL,
+  first_seen_at                TEXT NOT NULL,
+  observed_at                  TEXT NOT NULL,
+  conflicted_at                TEXT
+);
+CREATE INDEX IF NOT EXISTS settlement_observation_by_slice ON settlement_observation(slice_ref);
+
+CREATE TABLE IF NOT EXISTS settlement_incident (
+  id               TEXT PRIMARY KEY,
+  correlation_id   TEXT NOT NULL REFERENCES run_reservation(correlation_id),
+  orca_dispatch_id TEXT,
+  slice_ref        TEXT NOT NULL,
+  kind             TEXT NOT NULL,
+  evidence_digest  TEXT NOT NULL,
+  detail_json      TEXT NOT NULL,
+  blocked          INTEGER NOT NULL DEFAULT 1,
+  resolved_at      TEXT,
+  resolution_note  TEXT,
+  raised_at        TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS settlement_incident_unique
+  ON settlement_incident(correlation_id, kind, evidence_digest);
+CREATE INDEX IF NOT EXISTS settlement_incident_by_slice ON settlement_incident(slice_ref);
+`
+
+function readSchemaVersion(db: SyncDatabase): number | undefined {
   const row = db.prepare("SELECT value FROM execution_meta WHERE key = 'schema_version'").get() as
     | { value: string }
     | undefined
-  if (!row) {
-    db.prepare("INSERT INTO execution_meta (key, value) VALUES ('schema_version', ?)").run(
-      String(EXECUTION_SCHEMA_VERSION)
-    )
+  return row ? Number(row.value) : undefined
+}
+
+/**
+ * §11.1 — versioned upgrade. Idempotent and transactional. An existing v2 store
+ * opens, keeps every S1 row untouched, and gains the two S2 tables; a v2 store
+ * upgraded to v3 and a freshly created v3 store are structurally identical.
+ */
+export function migrateExecutionStore(db: SyncDatabase): void {
+  const alreadyInTransaction = db.isTransaction
+  if (!alreadyInTransaction) {
+    db.exec('BEGIN IMMEDIATE')
+  }
+  try {
+    db.exec(CREATE_SQL)
+    db.exec(SETTLEMENT_PROJECTION_SQL)
+    const current = readSchemaVersion(db)
+    if (current === undefined) {
+      db.prepare("INSERT INTO execution_meta (key, value) VALUES ('schema_version', ?)").run(
+        String(EXECUTION_SCHEMA_VERSION)
+      )
+    } else if (current < EXECUTION_SCHEMA_VERSION) {
+      // The v3 step is only "ensure the two S2 tables + indexes exist" — done by CREATE above,
+      // because S2 adds no column and therefore needs no ALTER TABLE.
+      db.prepare("UPDATE execution_meta SET value = ? WHERE key = 'schema_version'").run(
+        String(EXECUTION_SCHEMA_VERSION)
+      )
+    }
+    if (!alreadyInTransaction) {
+      db.exec('COMMIT')
+    }
+  } catch (error) {
+    if (!alreadyInTransaction) {
+      db.exec('ROLLBACK')
+    }
+    throw error
   }
 }

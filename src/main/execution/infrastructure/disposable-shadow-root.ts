@@ -29,10 +29,11 @@ export class DisposableShadowRoot {
     return target
   }
 
-  /** Path for the slice's dedicated shadow orchestration DB (never the user's). */
-  shadowOrchestrationDbPath(): string {
-    return join(this.root, 'shadow-orchestration.db')
-  }
+  // ORCA-S2 §17 — this root NO LONGER owns the durable convergence DB. The single
+  // durable shadow orchestration.db lives OUTSIDE this root, at a stable configured
+  // path re-verified against execution_meta.shadow_orchestration_path; `cleanup()`
+  // (rmSync of the whole tree) must never reach it. Disposable *worktrees* stay
+  // under this root, unchanged.
 
   /** True when `dir` (already-existing or not) lives under this disposable root. */
   contains(dir: string): boolean {

@@ -4,9 +4,13 @@
 // adjudication (§7). Advisory only — never touches an authoritative run.
 
 import type { AuthoritativeExecutor } from './authoritative-executor'
+import type { SettlementConvergenceReport } from './converge-settlements'
 import type { ExecutionPlane } from './execution-plane'
 import type { ExecutionStore } from './execution-store'
-import { reconcileIncompleteReservations } from './reconcile-incomplete-reservations'
+import {
+  reconcileShadowExecutionState,
+  type ShadowSettlementDeps
+} from './reconcile-shadow-execution-state'
 import type { ReservationStore } from './reservation-store'
 import {
   makeAiControlRunRef,
@@ -38,6 +42,8 @@ export type ShadowObservationInput = {
   worktreeDirFor: (kind: 'auth' | 'shadow', correlationId: string) => string
   now: () => string
   newId: (prefix: string) => string
+  /** ORCA-S2 §9 / §15.2 — cutoff after which a still-non-terminal bound Dispatch is abandoned. */
+  staleAfter?: number
 }
 
 export type ShadowObservationReport = {
@@ -48,6 +54,8 @@ export type ShadowObservationReport = {
   divergences: readonly { dispatchId: string; dimension: string; adjudicationStatus: string }[]
   abandoned: readonly { workloadId: string; reason: string }[]
   reconcile: { scanned: number; abandoned: number }
+  /** ORCA-S2 — the durable settlement convergence report, when S2 convergence is composed. */
+  settlementConvergence?: SettlementConvergenceReport
 }
 
 export type ShadowObservationDeps = {
@@ -55,6 +63,8 @@ export type ShadowObservationDeps = {
   plane: ExecutionPlane
   store: ExecutionStore
   reservations: ReservationStore
+  /** ORCA-S2 §15 — present when a real durable shadow orchestration.db is composed. */
+  settlement?: ShadowSettlementDeps
 }
 
 function sanitize(error: unknown): string {
@@ -125,11 +135,18 @@ export async function runShadowObservation(
 ): Promise<ShadowObservationReport> {
   const { authoritativeExecutor, plane, store, reservations } = deps
 
-  // B2 — reconcile any incomplete reservation from a prior crash, first and idempotently.
-  const reconcile = reconcileIncompleteReservations(
-    { plane, store, reservations },
-    { sliceRef: input.sliceRef, now: input.now() }
+  // B2 / ORCA-S2 §15 — the SINGLE reconciliation coordinator, first and idempotently:
+  // converge terminal durable Dispatches → verify already-observed → abandon remainder.
+  const coordinated = reconcileShadowExecutionState(
+    { plane, store, reservations, settlement: deps.settlement },
+    {
+      sliceRef: input.sliceRef,
+      now: input.now,
+      newId: input.newId,
+      staleAfter: input.staleAfter
+    }
   )
+  const reconcile = coordinated.reconcile
 
   const bindings: RunBinding[] = []
   const observations: ParityObservation[] = []
@@ -314,6 +331,7 @@ export async function runShadowObservation(
     exclusionCount,
     divergences,
     abandoned,
-    reconcile: { scanned: reconcile.scanned, abandoned: reconcile.abandoned.length }
+    reconcile: { scanned: reconcile.scanned, abandoned: reconcile.abandoned.length },
+    settlementConvergence: coordinated.convergence ?? undefined
   }
 }

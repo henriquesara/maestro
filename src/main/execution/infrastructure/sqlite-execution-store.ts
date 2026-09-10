@@ -11,6 +11,7 @@ import {
   type RunBinding
 } from '../domain/execution-identity'
 import type { ParityObservation } from '../domain/parity'
+import { DEFAULT_BUSY_RETRY_BUDGET, runWithImmediateTransaction } from './with-immediate-transaction'
 
 // Execution bounded context — infrastructure. SqliteExecutionStore: the only
 // writer of run_binding / parity_observation / workload_exclusion (amendment §L).
@@ -63,6 +64,19 @@ export class SqliteExecutionStore implements ExecutionStore {
 
   get database(): SyncDatabase {
     return this.db
+  }
+
+  /** §16.1 — bounded SQLITE_BUSY acquisition retry budget for withImmediateTransaction. */
+  readonly busyRetryBudget = DEFAULT_BUSY_RETRY_BUDGET
+
+  /**
+   * ORCA-S2 §16.1 — additive seam. BEGIN IMMEDIATE; fn(); COMMIT / ROLLBACK on
+   * throw. Serialises Execution-store writers. On SQLITE_BUSY retry-budget
+   * exhaustion throws ExecutionStoreBusyError with no partial state and no open
+   * transaction. No existing method changes.
+   */
+  withImmediateTransaction<T>(fn: () => T): T {
+    return runWithImmediateTransaction(this.db, fn, this.busyRetryBudget)
   }
 
   recordBinding(binding: RunBinding): void {

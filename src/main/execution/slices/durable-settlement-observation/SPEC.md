@@ -26,6 +26,49 @@
 > `missing_git_artifact`, full Execution-store wipe, and `converged_by_s2` parity
 > row are removed throughout, including every acceptance gate, TDD target, crash
 > window, and appendix.
+>
+> **Revision note 2 (candidate, pre-freeze).** Focused architecture corrections
+> on top of `7609b2c5c7`. This is **not** an amendment — the SPEC is still an
+> unpublished candidate. (1) Transient source-snapshot instability during the
+> read → re-verify window is **not** a conflict: it returns a retryable
+> `SOURCE_UNSTABLE_RETRYABLE` result — never a `source_snapshot_changed`
+> incident, never a `settlement_incident`, never a `settlement_observation`
+> mutation, and it does not block the binding (§8, §13, §16.3, §16.4, §19).
+> `source_snapshot_changed` is reserved strictly for an already-persisted
+> `settlement_observation` versus a later **successfully-read stable** durable
+> snapshot with a different `source_digest`. (2) The cross-DB guarantee is stated
+> precisely — S2 claims **no** distributed atomicity; the source DB may still
+> change after the final source read and before Execution `COMMIT`, and that
+> window is closed only by a later Phase B re-read (§16.4). (3) One S1↔S2
+> composition model: `executeShadowIdentityObservationSlice` remains the
+> composition boundary and is extended by S2; a single application coordinator
+> `reconcileShadowExecutionState` owns the strict ordering converge →
+> verify-observed → abandon-remainder; there is **no** independent competing S2
+> startup root and **no** separate unconditional abandon pass (§2, §15, §17,
+> §21). (4) The implementation map now explicitly names the four ORCA-S1 files S2
+> modifies at the composition/application seam
+> (`reconcile-incomplete-reservations.ts`, `shadow-observation-service.ts`,
+> `disposable-shadow-root.ts`, `shadow-identity-observation.ts`); every "S1 is
+> unaffected" / "only one ORCA-S1 file changes" claim is removed — S1's
+> **authority and semantics** remain valid, but S2 necessarily touches S1
+> **composition seams** with **no authority transfer** (§2, §18, §24, §25,
+> Appendix A). (5) One stable **durable** shadow orchestration DB for this
+> Maestro shadow-migration environment, shared by the ORCA-S1/S2 shadow runtime
+> across process restarts, living **outside** `DisposableShadowRoot`;
+> missing-file startup fails closed with a named
+> `ShadowSettlementSourceMissingError`; empty-new-environment initialization is
+> defined separately from recovery; rollback never auto-deletes the durable
+> source DB (§9, §17, §19, §24). (6) Coupling reclassified from
+> `SMALL_ADDITIVE_ORCA_READ_API` to `EXECUTION_OWNED_SCHEMA_COUPLED_READER` — S2
+> adds no Orca API and changes no Orca core surface (§14, §25). (7) The canonical
+> serializer for `DurableSettlementSnapshot` is **Execution-owned** and mirrors
+> Orca `canonicalPayload` normalization semantics with executable
+> compatibility/ratchet tests — no import or export of Orca's module-private
+> function (§6.1, §21). (8) `withImmediateTransaction` treats `SQLITE_BUSY` as a
+> bounded retryable acquisition condition; on exhaustion it returns
+> `EXECUTION_STORE_BUSY_RETRYABLE` with no observation, no incident, no partial
+> state (§16.1, §16.3, §19). (9) The reconciliation state machine has exactly one
+> outcome per condition, including the two new retryable results (§15).
 
 **Normative source:** aiControlCenter `master` /
 `origin/master` == `c2d404a541a1136e4471d00aa94b616e1eac3a0d`,
@@ -103,18 +146,46 @@ identity — §L assigns exactly that integration to Execution. Delivery /
 Governance may consume a converged outcome only through a future public
 application contract; they never read or write S2's tables.
 
-S2 adds, all Execution-owned:
+S2 adds, all Execution-owned (new files):
 
 - the `settlement_observation` and `settlement_incident` aggregates (§12, §13);
 - the `DurableSettlementSource` **read port** (application) + one read-only
   infrastructure adapter over the shadow `orchestration.db` (§14);
 - the `convergeSettlements` application service — the two-phase sweep (§8);
+- the `reconcileShadowExecutionState` application **coordinator** — the single
+  ordering authority converge → verify-observed → abandon-remainder (§15);
 - an additive `withImmediateTransaction` seam on the Execution SQLite store
   (§16);
 - the schema **v2 → v3** upgrade — **new tables only, no column added to any
-  ORCA-S1 table** (§11);
-- a modification to `reconcileIncompleteReservations` that replaces its
-  terminal-Dispatch branch (§15).
+  ORCA-S1 table** (§11).
+
+S2 also **modifies these existing ORCA-S1 files** at the
+Execution-composition / application seam (no authority transfer — §6, §18, §25):
+
+- `src/main/execution/application/reconcile-incomplete-reservations.ts` — its
+  terminal-Dispatch branch must **no longer unconditionally abandon**; it
+  delegates to convergence via the coordinator (§15).
+- `src/main/execution/application/shadow-observation-service.ts` — the
+  convergence / reconciliation dependencies and the unified converge-before-abandon
+  ordering are threaded through `runShadowObservation` (§15, §21).
+- `src/main/execution/infrastructure/disposable-shadow-root.ts` — the disposable
+  worktree/root **no longer owns the durable convergence DB lifetime**;
+  `shadowOrchestrationDbPath()` / `cleanup()` stop governing the shared durable
+  shadow `orchestration.db` (§17).
+- `src/main/execution/slices/shadow-identity-observation/shadow-identity-observation.ts`
+  — `executeShadowIdentityObservationSlice` composes the **durable out-of-root**
+  shadow DB path, the shadow writer + the read-only reader construction, and the
+  cleanup ownership split (§17, §21).
+
+Plus the Execution-owned schema/store files `execution-schema.ts` (versioned
+v2→v3, additive DDL only) and `sqlite-execution-store.ts` (the additive
+`withImmediateTransaction` method — no existing method changes).
+
+This is an ORCA-S1 **implementation / composition seam** change to extend the
+published runtime. ORCA-S1's **accepted authority and reconciliation semantics
+remain valid and unchanged**; there is **no** authority transfer. The claim "S1
+is unaffected" / "only one ORCA-S1 application file changes" does **not** hold
+and is not made anywhere in this spec.
 
 ## 3. Objective (one paragraph)
 
@@ -128,18 +199,25 @@ canonicalised ordered `attempt_observation_facts` for that dispatch **if any
 exist** — never from an in-process `ShadowExecutionResult` and never from Git
 worktree state; (b) cites its exact source facts as `provenance_json` and pins
 their content with a **`source_digest`** =
-`SHA-256(canonical_serialize(DurableSettlementSnapshot))`; (c) is produced by a
+`SHA-256(canonicalSerialize(DurableSettlementSnapshot))` — the serialiser is
+Execution-owned (§6.1); (c) is produced by a
 **two-phase** `convergeSettlements` sweep that is a pure, idempotent function of
 `(Execution store state, shadow orchestration.db state, now)` — runnable at
 process start, repeatedly, after a **settlement-projection rebuild**, and after
-any crash, always reaching the same source-derived observation set. Divergences
-that replay of durable facts cannot resolve — a foreign/unresolvable Dispatch, or
-a later durable snapshot whose digest differs from the one already observed — are
+any crash, always reaching the same source-derived observation set. **Durable
+semantic** divergences that replay of durable facts cannot resolve — a
+foreign/unresolvable Dispatch, or a later **successfully-read stable** durable
+snapshot whose digest differs from the immutable digest already observed — are
 recorded as blocking `settlement_incident` rows keyed by
 `(correlation_id, kind, evidence_digest)` and **never** auto-resolved into or
-over an observation (§F.7). Authority stays `AICONTROL_NATIVE`; Orca stays
-advisory; `data/app.db` is never opened for write and is byte-identical before
-and after, on every path including every incident and every crash path.
+over an observation (§F.7). A **transient** inability to obtain a stable
+point-in-time snapshot, or to acquire the Execution write transaction, is **not**
+a divergence and **not** an incident — it returns a retryable result
+(`SOURCE_UNSTABLE_RETRYABLE` / `EXECUTION_STORE_BUSY_RETRYABLE`), leaves the
+binding untouched, and is surfaced in the convergence report for the next sweep
+(§16). Authority stays `AICONTROL_NATIVE`; Orca stays advisory; `data/app.db` is
+never opened for write and is byte-identical before and after, on every path
+including every incident, every retryable result, and every crash path.
 
 ## 4. Ubiquitous / domain language
 
@@ -152,7 +230,8 @@ and after, on every path including every incident and every crash path.
 | **Settlement observation** | A durable Execution-owned row: one converged `DurableSettlementSnapshot` for one `run_binding`. Fields §12. **Advisory.** Never a `data/app.db` write, never a Governance AgentRun terminal write, never a `parity_observation` write. |
 | **Two-phase convergence sweep** | `convergeSettlements(sliceRef, now)` — **Phase A** attempts convergence for every binding with no `settlement_observation`; **Phase B** re-reads the durable snapshot for every already-observed binding and verifies its `source_digest` (§8). |
 | **Settlement provenance** | `provenance_json` — the full canonical `DurableSettlementSnapshot` plus `{ resolved_dispatch_id, resolved_run_id, source_db_path }`. Non-empty for every observation and every incident. Only observed durable facts; no invented state. |
-| **Settlement incident** | A divergence replay of durable facts cannot resolve (§F.7): `foreign_dispatch`, `source_snapshot_changed`, `invalid_or_unresolvable_source`. Recorded in `settlement_incident`, **blocks** that binding (no new observation; an existing observation row is preserved untouched), sweep continues, report lists it. **Never auto-resolved. Never overwritten by later conflicting evidence** (the key includes `evidence_digest`). |
+| **Settlement incident** | A **durable semantic** divergence replay of durable facts cannot resolve (§F.7): `foreign_dispatch`, `invalid_or_unresolvable_source`, `source_snapshot_changed`. Recorded in `settlement_incident`, **blocks** that binding (no new observation; an existing observation row is preserved untouched), sweep continues, report lists it. **Never auto-resolved. Never overwritten by later conflicting evidence** (the key includes `evidence_digest`). A transient operational inability (source snapshot unstable across the double-read; `SQLITE_BUSY`; transaction-acquisition failure) is **not** an incident (§13). |
+| **Retryable convergence result** | `SOURCE_UNSTABLE_RETRYABLE` (a stable point-in-time source snapshot could not be obtained within the bounded re-verify budget) or `EXECUTION_STORE_BUSY_RETRYABLE` (the Execution write transaction could not be acquired within the bounded busy-retry budget). Neither writes any durable row, mutates any observation, or blocks the binding. Both are surfaced in the `SettlementConvergenceReport` / diagnostics (never a silent skip); the next sweep may retry (§16.3, §19). |
 | **Foreign / unresolvable Dispatch** | The **latest** Dispatch for the correlation's task is not `run_binding.orca_dispatch_id`, or its `run_id` ≠ `run_binding.orca_run_id`, or the task `spec` correlation marker matches no Execution `run_reservation`. §F.5 / §L / ORCA-S1 I4. Never projects → `foreign_dispatch` incident. |
 | **Settlement-projection rebuild** | Drop and recreate **only** S2-owned projection state (`settlement_observation`, `settlement_incident`) while preserving `run_binding`, `run_reservation`, and the durable shadow `orchestration.db`. Replay equivalence is **semantic** equivalence of source-derived fields, not byte-identical rows (§17). |
 | Opaque ref | `OrcaRunRef` / `OrcaDispatchRef` / `OrgTaskRef` / `AiControlRunRef` / `GovernanceAgentRunRef` / `CorrelationId` — branded strings, unchanged from ORCA-S1. No Orca row type crosses the port (§P.6). |
@@ -204,13 +283,19 @@ DurableSettlementSnapshot {
 
 - **Canonical serialisation.** Object keys sorted ascending; arrays in the
   documented order; `undefined` encoded as `null`; strings/numbers/booleans as
-  minimal JSON. (The same shape as Orca's own `canonicalPayload` in
-  `attempt-observation-store.ts` — reuse it; do not invent a second canonical
-  form.) `taskResultCanonical` is the parse-then-canonicalise of `tasks.result`;
-  if `tasks.result` is present but not valid JSON → **not** a snapshot →
-  `invalid_or_unresolvable_source` incident (§13).
-- **`source_digest`** = `SHA-256(hex)` of the canonical serialisation of the whole
-  `DurableSettlementSnapshot`.
+  minimal JSON. This serialiser is **Execution-owned** (a new domain function,
+  `canonicalSerialize(DurableSettlementSnapshot)`), **not** an import of Orca's
+  module-private `canonicalPayload` (`attempt-observation-store.ts` — it is not
+  exported, and S2 requires **no** Orca-core export change). It **mirrors** the
+  relevant normalization semantics of `canonicalPayload` where those apply
+  (recursive key-sort, array order preserved, minimal scalar encoding), pinned by
+  executable **compatibility / ratchet tests** that fail loudly if Orca's
+  canonical form drifts from S2's. `taskResultCanonical` is the
+  parse-then-`canonicalSerialize` of `tasks.result`; if `tasks.result` is
+  present but not valid JSON → **not** a snapshot → `invalid_or_unresolvable_source`
+  incident (§13).
+- **`source_digest`** = `SHA-256(hex)` of
+  `canonicalSerialize(DurableSettlementSnapshot)` over the whole snapshot.
 - **No wall clock, no Git, no in-process result** contributes to the snapshot or
   the digest. `dispatchCompletedAt` / `taskCompletedAt` are Orca's own durable
   timestamps and are part of the content identity.
@@ -247,10 +332,23 @@ incident (§13), **not** an invented outcome.
 fold keyed by `correlation_id`, separate from the reservation lifecycle:
 
 ```
-binding with a terminal shadow Dispatch, no settlement_observation, digest D
+binding with a terminal shadow Dispatch, no settlement_observation,
+STABLE snapshot re-read inside the write txn yields digest D
     --convergeSettlements Phase A-->
         settlement_observation WRITTEN once (source_digest = D; status = 'observed')
         [run_reservation advances to 'observed' if still 'settled'/'executed'/'bound'/'orca_created']
+
+binding with a terminal shadow Dispatch, no settlement_observation,
+BUT the source snapshot keeps changing across the bounded re-verify retries
+    --convergeSettlements Phase A-->
+        NO settlement_observation, NO settlement_incident, binding NOT blocked;
+        return SOURCE_UNSTABLE_RETRYABLE (surfaced in the report); next sweep may retry
+
+any Phase-A or Phase-B decision whose Execution write transaction cannot be
+acquired within the bounded SQLITE_BUSY retry budget
+    --convergeSettlements-->
+        NO durable row of any kind, NO partial state, binding NOT blocked;
+        return EXECUTION_STORE_BUSY_RETRYABLE (surfaced in the report); next sweep may retry
 
 binding whose reservation crashed mid-lifecycle (orca_created|bound|executed|settled)
 AND whose LATEST shadow Dispatch IS the bound one AND IS terminal in orchestration.db
@@ -268,14 +366,20 @@ binding whose LATEST shadow Dispatch for the task ≠ run_binding.orca_dispatch_
    (or run_id mismatch, or correlation-marker mismatch)
     --convergeSettlements-->  settlement_incident(kind='foreign_dispatch'); binding BLOCKED; NO observation
 
-already-observed binding, Phase B re-reads snapshot, digest == stored
+already-observed binding, Phase B STABLE re-read, digest == stored
     --convergeSettlements Phase B-->  no-op (§F.6)
 
-already-observed binding, Phase B re-reads snapshot, digest != stored (digest D2)
+already-observed binding, Phase B STABLE re-read (digest coherent across the
+double-read), digest != the immutable stored source_digest (digest D2)
     --convergeSettlements Phase B-->
         settlement_incident(kind='source_snapshot_changed', evidence_digest=D2); binding BLOCKED;
         settlement_observation.status: 'observed' -> 'observed_conflicted' (the ONLY permitted mutation of that row);
         all source-derived columns of the existing observation LEFT UNCHANGED
+
+already-observed binding, Phase B re-read UNSTABLE across the bounded retries
+    --convergeSettlements Phase B-->
+        NO settlement_incident, NO status mutation, binding NOT blocked;
+        return SOURCE_UNSTABLE_RETRYABLE (surfaced in the report); next sweep may retry
 ```
 
 - `settlement_observation.correlation_id` is **PRIMARY KEY** — at most one
@@ -289,6 +393,15 @@ already-observed binding, Phase B re-reads snapshot, digest != stored (digest D2
   new `settlement_observation` and **no** further convergence for that binding
   until the incident is adjudicated. Adjudication is **out of S2 scope**; S2 only
   raises, blocks, and exposes the contract (§13).
+- **`source_snapshot_changed` is reserved for exactly one condition:** an
+  already-persisted `settlement_observation` **plus** a later
+  **successfully-read stable** durable source snapshot whose `source_digest`
+  differs from the immutable stored digest. Only that condition may insert a
+  `source_snapshot_changed` incident, transition `observed → observed_conflicted`,
+  and set `conflicted_at`. A **Phase A** pass (no observation yet) can **never**
+  create `source_snapshot_changed`. A source that merely changed *during* the
+  read → re-verify window is **transient instability**, not a conflict:
+  `SOURCE_UNSTABLE_RETRYABLE`, no incident, no mutation, no block (§16.3).
 
 ## 8. Two-phase convergence — normative scan model
 
@@ -313,12 +426,21 @@ For each such binding whose `run_reservation` is not `abandoned`:
 3. If terminal → build the `DurableSettlementSnapshot` and `source_digest` (§6).
    If it cannot be canonicalised → `invalid_or_unresolvable_source` incident
    (§13); binding blocked; continue.
-4. **Commit** the convergence decision atomically (§16): re-verify the snapshot
-   digest inside the Execution write transaction, then
+4. **Commit** the convergence decision atomically (§16): enter
+   `withImmediateTransaction` (bounded `SQLITE_BUSY` retry — on exhaustion return
+   `EXECUTION_STORE_BUSY_RETRYABLE`, no row, no incident), **re-read** the source
+   snapshot inside the transaction and recompute the digest; if the re-read
+   digest differs from step 3's (source moved under us), `ROLLBACK` and retry
+   from step 1 up to the bounded budget, and on budget exhaustion return
+   `SOURCE_UNSTABLE_RETRYABLE` — **no `settlement_observation`, no
+   `settlement_incident`, binding not blocked** (§16.3). On a stable re-read:
    `INSERT` the `settlement_observation` (PK `correlation_id`), advance the
    `run_reservation` to `observed` by CAS if still in
-   `{orca_created, bound, executed, settled}`. A PK collision from a concurrent
-   sweep is treated as a **no-op**, not an error (§16).
+   `{orca_created, bound, executed, settled}`. Because `BEGIN IMMEDIATE`
+   serialises Execution-store writers, a concurrent sweep that acquires second
+   re-reads inside its own transaction, sees the existing observation in the
+   precheck, and no-ops; the `correlation_id` PK is a backstop, not the primary
+   mechanism, and a PK collision is treated as a **no-op**, not an error (§16).
 
 ### Phase B — bindings **with** a `settlement_observation`
 
@@ -327,14 +449,20 @@ For each such binding:
 1. Re-resolve and re-read the durable snapshot via the port (same identity checks
    as Phase A step 1; a Dispatch that has become foreign → `foreign_dispatch`
    incident).
-2. Recompute `source_digest`.
+2. Obtain a **stable** `source_digest`: read, enter `withImmediateTransaction`
+   (bounded `SQLITE_BUSY` retry → `EXECUTION_STORE_BUSY_RETRYABLE` on
+   exhaustion), re-read inside the transaction; if the two reads disagree,
+   `ROLLBACK` and retry up to the bounded budget, and on exhaustion return
+   `SOURCE_UNSTABLE_RETRYABLE` — **no incident, no `status` mutation, binding not
+   blocked** (§16.3). On a stable digest:
    - **== stored `source_digest`** → **no-op**.
-   - **!= stored** → atomically (§16): `INSERT` a
-     `settlement_incident(kind='source_snapshot_changed', evidence_digest=<new digest>)`,
+   - **!= the immutable stored `source_digest`** → atomically (§16): `INSERT` a
+     `settlement_incident(kind='source_snapshot_changed', evidence_digest=<new stable digest>)`,
      and mutate the existing `settlement_observation` `status`
      `'observed' → 'observed_conflicted'` + set `conflicted_at`. The existing
      observation's source-derived columns are **never** rewritten. The binding is
-     blocked from further convergence.
+     blocked from further convergence. This is the **only** path that creates a
+     `source_snapshot_changed` incident.
 3. If the observation already has `status = 'observed_conflicted'` and an open
    incident with the same `evidence_digest` → **no-op** (idempotent
    re-detection). A *different* new digest → a *new* incident row (the key
@@ -348,10 +476,15 @@ are the state machine's (§15). It performs **no** Git call of any kind.
 - `executionStorePath` — the ORCA-S1 Execution-owned SQLite store, migrated to
   schema v3. `:memory:` allowed for tests. **Rejected if it aliases
   `data/app.db`** (ORCA-S1 B4 guard, reused).
-- `shadowOrchestrationPath` — the **dedicated shadow** `orchestration.db`. It
-  **MUST live outside** the disposable shadow worktree/root, at a stable,
-  configured path (§17). `:memory:` is allowed **only** for a single-process
-  test; a restart-safety test requires a real file path. The
+- `shadowOrchestrationPath` — the **one durable shadow** `orchestration.db` for
+  this shadow-migration environment, shared by the ORCA-S1 writer and the S2
+  reader across restarts. It **MUST live outside** `DisposableShadowRoot`, at a
+  stable, configured path re-verified against
+  `execution_meta.shadow_orchestration_path` on every startup (§17):
+  configured≠persisted → `ShadowSourcePathMismatchError`; persisted-but-file-missing
+  with durable bindings present → `ShadowSettlementSourceMissingError` (S2 does
+  **not** create a replacement). `:memory:` is allowed **only** for a
+  single-process test; a restart-safety test requires a real file path. The
   `DurableSettlementSource` adapter opens it **genuinely SQLite-read-only**
   (`readonly: true, fileMustExist: true`).
 - `aicontrolDbPath` — canonical aiControlCenter `data/app.db`. **GUARD ONLY**
@@ -374,9 +507,14 @@ are the state machine's (§15). It performs **no** Git call of any kind.
   `{ sliceRef, scannedPhaseA, scannedPhaseB, observed: ObservedRef[],
      conflicted: ConflictedRef[], incidents: IncidentRef[], noop: number,
      abandoned: AbandonRef[], sweepErrors: SweepErrorRef[],
+     retryable: RetryableRef[],   // { correlationId, phase, reason:
+                                  //   'SOURCE_UNSTABLE_RETRYABLE' | 'EXECUTION_STORE_BUSY_RETRYABLE',
+                                  //   attempts } — never a silent skip
      dbGuard: { pathHashBefore, pathHashAfter, sidecarsAfter, unchanged },
      sourceGuard: { openedReadonly: true, ddlIssued: 0, pragmaJournalMutations: 0,
                     triggersCreated: 0, metadataWrites: 0, sidecarsCreatedByS2: 0 } }`.
+  A `retryable` entry writes **no** durable row and leaves its binding for the
+  next sweep (§16.3).
 - **No `parity_observation` row is written or modified by S2** (§18, §26 attack
   11).
 
@@ -427,7 +565,7 @@ insert" shape to a **versioned** upgrade:
 
 **Result:** an existing ORCA-S1 (v2) store opens, keeps every S1 row untouched,
 and gains the two S2 tables; a v2 store upgraded to v3 and a freshly created v3
-store are **structurally identical** (criterion 13). The upgrade shape (version
+store are **structurally identical** (criterion 15). The upgrade shape (version
 compare + explicit bump) is defined now even though v3 needs no `ALTER`, so a
 later v4 has a real ladder to extend.
 
@@ -490,13 +628,15 @@ CREATE INDEX IF NOT EXISTS settlement_incident_by_slice ON settlement_incident(s
   source_db_path }`.
 - **Observed outcome** — `observed_outcome_json` is the `SettlementObservedOutcome`
   (§6.2). **No `filesChanged`, no `candidate_head`, no Git.**
-- **Deduplication** — PRIMARY KEY on `correlation_id`. Phase B with an
-  **identical** `source_digest` → **no-op**.
-- **Content identity, no ordering** — a Phase B pass with a **different**
-  `source_digest` → `source_snapshot_changed` incident + `status`
-  `'observed' → 'observed_conflicted'`. S2 makes **no** claim about which
-  snapshot is newer; there is **no** watermark, **no** regression direction, **no**
-  monotonic sequence.
+- **Deduplication** — PRIMARY KEY on `correlation_id`. Phase B with a **stable**
+  re-read whose `source_digest` is **identical** → **no-op**.
+- **Content identity, no ordering** — a Phase B pass with a **stable** re-read
+  whose `source_digest` **differs** from the immutable stored one →
+  `source_snapshot_changed` incident + `status` `'observed' → 'observed_conflicted'`.
+  A re-read that could not be stabilised across the bounded budget is
+  `SOURCE_UNSTABLE_RETRYABLE` — **no** incident, **no** mutation (§16.3). S2 makes
+  **no** claim about which snapshot is newer; there is **no** watermark, **no**
+  regression direction, **no** monotonic sequence.
 - **Replay behaviour** — `convergeSettlements` is safe to run any number of times.
   After the first observation for a binding, Phase A skips it and Phase B is a
   no-op while the digest is stable. A **settlement-projection rebuild** (§17) +
@@ -511,13 +651,25 @@ CREATE INDEX IF NOT EXISTS settlement_incident_by_slice ON settlement_incident(s
 
 ## 13. Incident semantics (§F.7 — minimal, executable, non-overwriting)
 
-Exactly three kinds, each with a deterministic trigger backed by durable facts:
+Incidents are **durable semantic** divergences only. Exactly three kinds, each
+with a deterministic trigger backed by durable facts:
 
 | `kind` | Deterministic trigger (durable facts only) | `evidence_digest` | Durable evidence in `detail_json` | Blocks convergence? |
 | --- | --- | --- | --- | --- |
-| `foreign_dispatch` | The **latest** Dispatch for the correlation's task is not `run_binding.orca_dispatch_id`, **or** its `run_id` ≠ `run_binding.orca_run_id`, **or** the resolving task's `spec` marker matches no Execution `run_reservation`. (§F.5, ORCA-S1 I4.) | `SHA-256(resolved_dispatch_id ‖ resolved_run_id ‖ correlationId)` | resolved dispatch id + run id, the bound ids, which check failed | Yes — no observation for this binding. |
-| `source_snapshot_changed` | A **Phase B** re-read produces a `DurableSettlementSnapshot` whose `source_digest` ≠ the `source_digest` stored on the existing `settlement_observation`. | the **new** (conflicting) `source_digest` | old digest, new digest, both canonical snapshots | Yes — plus `observation.status → 'observed_conflicted'`. The existing observation row's source columns are untouched. |
-| `invalid_or_unresolvable_source` | The bound Dispatch is terminal but a `DurableSettlementSnapshot` cannot be built: `tasks.result` present but not valid JSON; or a field required for `SettlementObservedOutcome` (§6.2) is structurally absent and the status alone cannot classify. | `SHA-256` of the partial/failed canonical snapshot attempt | exactly what was read, and which structural expectation failed | Yes — no observation; **no invented outcome**. |
+| `foreign_dispatch` | Durable identity / equality violation: the **latest** Dispatch for the correlation's task is not `run_binding.orca_dispatch_id`, **or** its `run_id` ≠ `run_binding.orca_run_id`, **or** the resolving task's `spec` marker matches no Execution `run_reservation`. (§F.5, ORCA-S1 I4.) | `SHA-256(resolved_dispatch_id ‖ resolved_run_id ‖ correlationId)` | resolved dispatch id + run id, the bound ids, which check failed | Yes — no observation for this binding. |
+| `invalid_or_unresolvable_source` | A **stable** durable source exists but cannot satisfy the required canonical source contract: the bound Dispatch is terminal but a `DurableSettlementSnapshot` cannot be built — `tasks.result` present but not valid JSON; or a field required for `SettlementObservedOutcome` (§6.2) is structurally absent and the status alone cannot classify. | `SHA-256` of the partial/failed canonical snapshot attempt | exactly what was read, and which structural expectation failed | Yes — no observation; **no invented outcome**. |
+| `source_snapshot_changed` | **Only:** an already-persisted `settlement_observation` **plus** a **Phase B** re-read that produced a **stable** `DurableSettlementSnapshot` (digest coherent across the double-read) whose `source_digest` ≠ the immutable `source_digest` stored on that observation. | the **new** stable (conflicting) `source_digest` | old digest, new digest, both canonical snapshots | Yes — plus `observation.status → 'observed_conflicted'`. The existing observation row's source columns are untouched. |
+
+**Not an incident — transient operational inability (no durable row of any
+kind, binding not blocked, surfaced in the report, retried next sweep):**
+
+- the source snapshot changed *during* the read → re-verify double-read window
+  and stayed unstable across the bounded retry budget → `SOURCE_UNSTABLE_RETRYABLE`
+  (§16.3). This proves only "a stable point-in-time source snapshot could not be
+  obtained", **not** a semantic conflict;
+- `SQLITE_BUSY` on the Execution write transaction across the bounded busy-retry
+  budget → `EXECUTION_STORE_BUSY_RETRYABLE` (§16.1);
+- any other temporary transaction-acquisition failure.
 
 Rules for every kind:
 
@@ -599,56 +751,86 @@ type DurableSettlementRead =
 - **Terminal statuses:** `completed`, `failed`, `circuit_broken`
   (`dispatch_contexts` CHECK at the Orca base).
 
-**Coupling classification (§25):** `SMALL_ADDITIVE_ORCA_READ_API` /
-**schema-coupled read seam**. New files under `src/main/execution/infrastructure/`
-only. **Zero Orca-core semantic modification.** The seam is coupled to the column
-names of `tasks` / `dispatch_contexts` / `attempt_observation_facts` at the
-vendored Orca base; a drift in those three tables is a maintenance signal
-(Appendix B ratchet note). **No hook.**
+**Coupling classification (§25):** `EXECUTION_OWNED_SCHEMA_COUPLED_READER`. The
+adapter lives under `src/main/execution/infrastructure/`; opens the **existing**
+shadow orchestration SQLite database directly **read-only**; issues **SELECT-only**
+over the required Orca-owned tables; makes **no Orca API / core source change**;
+performs **no migration / DDL / trigger / write / journal-mode mutation**. The
+table/column coupling to `tasks` / `dispatch_contexts` / `attempt_observation_facts`
+at the vendored Orca base is **explicit**, and schema-drift **ratchet tests fail
+loudly** if the vendored Orca schema changes (Appendix B). S2 adds **no Orca
+API** and changes **no Orca core surface**. **No hook.**
 
 ## 15. Unified reconciliation state machine (§F, §S)
 
-**`reconcileIncompleteReservations` is modified, not "kept behaviourally
-intact".** Its terminal-Dispatch branch is replaced by a delegation to
-`convergeSettlements`. There is exactly **one** authoritative reconciliation
-state machine, evaluated per binding/reservation from durable state only:
+### 15.1 One coordinator, one ordering
+
+There is exactly **one** application reconciliation coordinator,
+`reconcileShadowExecutionState(deps, { sliceRef, now })` (new,
+`src/main/execution/application/`), threaded through `runShadowObservation`
+(`shadow-observation-service.ts`) where `reconcileIncompleteReservations` runs
+today. It runs three phases in **strict order**, from durable state only:
+
+1. **Converge** terminal durable Dispatches — `convergeSettlements` Phase A.
+2. **Verify** already-observed bindings — `convergeSettlements` Phase B.
+3. **Abandon remainder** — only *then* apply the ORCA-S1 abandonment semantics
+   to reservations still incomplete (never-created / non-terminal / stale). This
+   is the **modified** `reconcileIncompleteReservations`: its terminal-Dispatch
+   case is no longer unconditionally abandoned — that case has already been
+   handled by phase 1 and is no longer `listIncomplete` when phase 3 reads.
+
+There is **no** independent competing S2 startup root and **no** separate
+unconditional abandon pass running in parallel with convergence.
+`reconcileIncompleteReservations` is **modified**, not "kept behaviourally
+intact".
+
+### 15.2 Per-binding outcomes — exactly one per condition
 
 | Condition (durable facts) | Outcome |
 | --- | --- |
-| No Dispatch ever created (reservation `reserved`; source `no_task` / `no_dispatch`) | **abandon** — `run_reservation → 'abandoned'` (unchanged from ORCA-S1). |
-| Latest bound Dispatch exists, **non-terminal**, before `staleAfter` | leave; retried next pass. |
-| Latest bound Dispatch exists, **non-terminal**, after `staleAfter` | `abandonShadow` + `run_reservation → 'abandoned'` (unchanged from ORCA-S1 — genuinely stuck). |
-| Latest bound Dispatch is **terminal**, no `settlement_observation` | **converge** → `settlement_observation` once; `run_reservation → 'observed'` (Phase A). |
+| No Dispatch ever created (reservation `reserved`; source `no_task` / `no_dispatch`) | **abandon** — `run_reservation → 'abandoned'` (unchanged ORCA-S1 semantics; phase 3). |
+| Latest bound Dispatch exists, **non-terminal**, before `staleAfter` | leave; retried next pass (phase 3). |
+| Latest bound Dispatch exists, **non-terminal**, after `staleAfter` | `abandonShadow` + `run_reservation → 'abandoned'` (unchanged ORCA-S1 semantics — genuinely stuck; phase 3). |
+| Latest bound Dispatch **terminal**, no `settlement_observation`, **stable** snapshot obtained | **converge** → `settlement_observation` once; `run_reservation → 'observed'` (phase 1 / Phase A). |
+| Latest bound Dispatch **terminal**, no `settlement_observation`, but a **stable** snapshot could not be obtained within the bounded re-verify budget | **`SOURCE_UNSTABLE_RETRYABLE`** — no observation, **no incident**, no abandon, binding **not** blocked; surfaced in the report; retried next sweep (§16.3). |
+| Any decision whose Execution write transaction cannot be acquired within the bounded `SQLITE_BUSY` retry budget | **`EXECUTION_STORE_BUSY_RETRYABLE`** — no durable row, no partial state, **no incident**, no abandon, binding **not** blocked; surfaced in the report; retried next sweep (§16.1). |
 | Latest Dispatch for the task ≠ bound dispatch / `run_id` mismatch / marker mismatch | `foreign_dispatch` incident; binding **blocked**; no observation, no abandon. |
-| Already observed, Phase B digest **==** stored | **no-op**. |
-| Already observed, Phase B digest **!=** stored | `source_snapshot_changed` incident; `observation.status → 'observed_conflicted'`; binding **blocked**. |
-| Incident-blocked binding (`settlement_incident` with `resolved_at IS NULL`) | **no automatic convergence, no abandon** — skipped in both phases. |
+| Already observed, Phase B **stable** re-read, digest **==** stored | **no-op**. |
+| Already observed, Phase B **stable** re-read, digest **!=** the immutable stored digest | `source_snapshot_changed` incident; `observation.status → 'observed_conflicted'` + `conflicted_at`; binding **blocked**; source columns untouched. |
+| Already observed, Phase B re-read **unstable** across the bounded budget | **`SOURCE_UNSTABLE_RETRYABLE`** — no incident, no `status` mutation, no block; retried next sweep. |
+| Incident-blocked binding (`settlement_incident` with `resolved_at IS NULL`) | **no automatic convergence, no abandon** — skipped in all phases. |
 
-**Ordering guarantee (composition root, §21):** `convergeSettlements` (Phase A +
-Phase B) runs to completion **before** any abandon decision in
-`reconcileIncompleteReservations`. A reservation that Phase A advanced to
-`observed` is therefore no longer in `listIncomplete` when the abandon pass
-reads it. **The same durable source facts can never race to both `abandon` and
-`converge`** — convergence has strict priority and is idempotent; abandon only
-sees what convergence declined (never-created / non-terminal / stale).
+**No same durable stable snapshot may race into both abandon and observation.**
 
-**Crash windows** (superset of ORCA-S1's A–F; S2's are G1–G5):
+**Ordering guarantee (coordinator, §21):** phases 1–2 run to completion **before**
+any abandon decision in phase 3. A reservation that phase 1 advanced to
+`observed` is no longer in `listIncomplete` when phase 3 reads it. Convergence
+has strict priority and is idempotent; abandon only ever sees what convergence
+declined (never-created / non-terminal / stale). The retryable results
+(`SOURCE_UNSTABLE_RETRYABLE`, `EXECUTION_STORE_BUSY_RETRYABLE`) leave the binding
+exactly where it was — a still-incomplete reservation with a terminal Dispatch is
+**not** abandoned on the strength of a retryable convergence failure; it waits
+for the next sweep.
+
+**Crash windows** (superset of ORCA-S1's A–F; S2's are G1–G6):
 
 | Window | Scenario | Required behaviour |
 | --- | --- | --- |
-| **G1** *(the window S2 exists for)* | Orca shadow Dispatch settled **durably**; Maestro process killed **before** any `convergeSettlements` ran. | Restart: Phase A converges it — exactly one `settlement_observation`, `source_digest` + full `provenance_json`. ORCA-S1 alone would have abandoned it. |
-| **G2** | Killed mid-`convergeSettlements`, **after** the read-only snapshot read, **before** the Execution write transaction committed. | Restart re-reads and writes **once**: the observation write + reservation advance are one `BEGIN IMMEDIATE` transaction (§16); a partial prior write is impossible. |
-| **G3** | Killed **after** the `settlement_observation` commit, **before** `run_reservation` advanced to `observed`. | Restart: Phase B recomputes the digest → `==` stored → no-op; the reservation advance is an idempotent CAS → **no** second observation. |
+| **G1** *(the window S2 exists for)* | Orca shadow Dispatch settled **durably**; Maestro process killed **before** any `reconcileShadowExecutionState` ran. | Restart: phase 1 (Phase A) converges it — exactly one `settlement_observation`, `source_digest` + full `provenance_json`. ORCA-S1 alone would have abandoned it. |
+| **G2** | Killed mid-convergence, **after** the read-only snapshot read, **before** the Execution write transaction committed. | Restart re-reads, re-verifies a **stable** digest, and writes **once**: the observation write + reservation advance are one `BEGIN IMMEDIATE` transaction (§16); a partial prior write is impossible. If the source moved meanwhile and stays unstable → `SOURCE_UNSTABLE_RETRYABLE`, no row, retried next sweep. |
+| **G3** | Killed **after** the `settlement_observation` commit, **before** `run_reservation` advanced to `observed`. | Restart: Phase B recomputes the digest → **stable** `==` stored → no-op; the reservation advance is an idempotent CAS → **no** second observation. |
 | **G4** | Killed **after** an incident commit, **before** anything downstream. | Restart re-detects the same evidence → same row (UNIQUE `(correlation_id, kind, evidence_digest)`); binding stays blocked. |
-| **G5** | Shadow `orchestration.db` replaced by a differing copy (or Orca genuinely re-settles) so a Phase B re-read yields a **different** `source_digest`. | `source_snapshot_changed` incident + `observation.status → 'observed_conflicted'`; the existing observation's source columns are **preserved untouched**; **never** a silent re-observe, **never** a source-column rewrite. No claim about rollback *direction*. |
+| **G5** | Shadow `orchestration.db` replaced by a differing copy (or Orca genuinely re-settles) so a Phase B re-read yields a **stable different** `source_digest` for an **already-observed** binding. | `source_snapshot_changed` incident + `observation.status → 'observed_conflicted'`; the existing observation's source columns are **preserved untouched**; **never** a silent re-observe, **never** a source-column rewrite. No claim about rollback *direction*. |
+| **G6** | Killed during a bounded retry loop that was returning `SOURCE_UNSTABLE_RETRYABLE` or `EXECUTION_STORE_BUSY_RETRYABLE` (no transaction ever committed). | Restart finds **no** durable row, **no** incident, binding **not** blocked; the next sweep re-attempts convergence from scratch. A retryable result is never persisted. |
 
 Harness: reuse ORCA-S1's separate-child-process SIGKILL pattern
 (`shadow-run-child.mjs` — plain ESM + `node:sqlite`, durable write → READY marker
 → hang). S2's child additionally **durably settles the shadow Dispatch**
-(`settleWorkerReport` against the shadow `orchestration.db`) **and closes /
-checkpoints that DB** before the READY marker; the parent SIGKILLs the child,
-then opens the read-only source, runs `convergeSettlements`, and asserts
-convergence. Tests are **marker-driven, never timing-driven** (HANDOFF residual).
+(`settleWorkerReport` against the shared durable shadow `orchestration.db`) **and
+closes / checkpoints that DB** before the READY marker; the parent SIGKILLs the
+child, then opens the read-only source, runs `reconcileShadowExecutionState`
+(convergence phases 1–2, then abandon phase 3), and asserts convergence. Tests
+are **marker-driven, never timing-driven** (HANDOFF residual).
 
 ## 16. Execution-store atomicity + cross-DB decision protocol
 
@@ -657,11 +839,28 @@ convergence. Tests are **marker-driven, never timing-driven** (HANDOFF residual)
 `SqliteExecutionStore` gains one additive method:
 
 ```
-withImmediateTransaction<T>(fn: () => T): T   // BEGIN IMMEDIATE; fn(); COMMIT / ROLLBACK on throw
+withImmediateTransaction<T>(fn: () => T): T
+//   BEGIN IMMEDIATE; fn(); COMMIT / ROLLBACK on throw.
+//   BEGIN IMMEDIATE serialises Execution-store writers.
+//   SQLITE_BUSY on acquiring the write lock is a BOUNDED retryable condition:
+//   retry the acquisition a small fixed number of times (candidate: 5), then
+//   give up and signal EXECUTION_STORE_BUSY_RETRYABLE to the caller.
+//   Give-up leaves NO transaction open, NO partial state.
 ```
 
 It wraps the shared `SyncDatabase` handle (the same handle `SqliteReservationStore`
 uses). No ORCA-S1 method changes signature or behaviour.
+
+- `BEGIN IMMEDIATE` **serialises** Execution-store writers — the design does
+  **not** rely on the losing writer reaching the `settlement_observation` PK
+  first. The second writer, once it acquires the lock, re-runs the §16.2
+  precheck inside its own transaction, sees the winner's observation, and
+  no-ops; the PK / UNIQUE constraints are a **backstop**.
+- On `SQLITE_BUSY` retry-budget exhaustion the decision returns
+  `EXECUTION_STORE_BUSY_RETRYABLE`: **no** `settlement_observation`, **no**
+  `settlement_incident`, **no** reservation advance, **no** partial state. The
+  binding is unchanged and the result is surfaced in the
+  `SettlementConvergenceReport`; the next sweep retries.
 
 ### 16.2 One convergence decision = one transaction
 
@@ -675,11 +874,14 @@ A single Phase-A or Phase-B decision **atomically** owns, inside one
 - the `run_reservation` / binding **state advancement** (CAS `UPDATE … WHERE
   state IN (…)`).
 
-**Constraints are the authority, not exception handling:**
+**Serialisation first, constraints as backstop:**
 
-- `settlement_observation.correlation_id` PRIMARY KEY — a concurrent sweep's
-  losing `INSERT` is caught and treated as a **no-op** (the winner's row stands);
-  the loser then re-reads and continues as a Phase B pass.
+- `BEGIN IMMEDIATE` serialises writers (§16.1); the in-transaction precheck is
+  the primary exactly-once mechanism.
+- `settlement_observation.correlation_id` PRIMARY KEY — if, despite
+  serialisation, a concurrent sweep's `INSERT` still collides, it is caught and
+  treated as a **no-op** (the winner's row stands); the loser then re-reads and
+  continues as a Phase B pass.
 - `settlement_incident` UNIQUE `(correlation_id, kind, evidence_digest)` —
   `INSERT … ON CONFLICT DO NOTHING`; a duplicate is a no-op.
 - reservation advance is `UPDATE run_reservation SET state='observed' WHERE
@@ -694,26 +896,64 @@ Protocol:
 
 1. Read `DurableSettlementRead` + `sourceDigest` via the port (outside any
    Execution transaction).
-2. `withImmediateTransaction`:
+2. `withImmediateTransaction` (bounded `SQLITE_BUSY` retry per §16.1; on
+   exhaustion → `EXECUTION_STORE_BUSY_RETRYABLE`, nothing written):
    a. Re-read the source snapshot **again** via the port; recompute
       `sourceDigest'`.
-   b. If `sourceDigest' !== sourceDigest` → **ROLLBACK** and retry from step 1,
-      bounded to a small fixed number of attempts (candidate: **3**).
+   b. If `sourceDigest' !== sourceDigest` → **ROLLBACK** and retry the whole
+      convergence attempt from step 1, bounded to a small fixed number of
+      attempts (candidate: **3**).
    c. Otherwise apply the §16.2 decision and **COMMIT**.
-3. Retries exhausted (the source kept changing under us) → record a
-   `source_snapshot_changed` incident with the **latest** observed digest as
-   `evidence_digest`; do **not** write an observation this pass.
+3. **Retry budget exhausted** (a stable point-in-time source snapshot could not
+   be obtained — the source kept changing across the double-read window):
+   - **ROLLBACK.**
+   - Do **NOT** create `source_snapshot_changed`.
+   - Do **NOT** create `settlement_incident` of any kind.
+   - Do **NOT** block the binding.
+   - Do **NOT** mutate `settlement_observation`.
+   - Return the explicit retryable convergence result **`SOURCE_UNSTABLE_RETRYABLE`**,
+     surfaced in the `SettlementConvergenceReport` / diagnostics (never a silent
+     skip). The next sweep may try again.
 
-**Guarantees:**
+   This condition means **only** "a stable point-in-time source snapshot could
+   not be obtained". It does **not** prove a semantic conflict. A `Phase A`
+   binding with no observation can **never** produce `source_snapshot_changed`
+   from this path.
 
-- The same source snapshot under concurrent sweeps converges to **exactly one**
-  durable result (PK + `ON CONFLICT DO NOTHING`).
+**What each layer actually guarantees:**
+
+- The same **stable** source snapshot under concurrent sweeps converges to
+  **exactly one** durable result (`BEGIN IMMEDIATE` serialisation + the
+  in-transaction precheck; PK / `ON CONFLICT DO NOTHING` as backstop).
 - A first observation and an incident are **never** produced from the **same**
   snapshot in the same pass: within one transaction the decision is either
-  "insert observation" **or** "insert incident", never both; the re-verify step
-  (2a) guarantees the committed decision matches a single coherent snapshot.
-- A **later** differing snapshot is allowed to drive
-  `observed → observed_conflicted` in a **subsequent** Phase B pass (§7, §8).
+  "insert observation" **or** "insert incident", never both.
+- A **later stable differing** snapshot is allowed to drive
+  `observed → observed_conflicted` in a **subsequent** Phase B pass (§7, §8) —
+  not in the pass that first observed.
+
+### 16.4 Exact cross-DB consistency guarantee (no distributed atomicity)
+
+S2 spans two SQLite databases — the read-only shadow `orchestration.db` and the
+Execution store — and **does not** provide a distributed transaction across
+them. The achievable guarantee, stated precisely:
+
+- the **source snapshot is point-in-time coherent** at the moment of the
+  successful in-transaction re-verification (step 2a);
+- the **Execution decision is atomic** inside the Execution-store
+  `BEGIN IMMEDIATE` transaction;
+- the source DB **may still change** after that final source read and before the
+  Execution `COMMIT` — S2 **does not** pretend to close that cross-database
+  window;
+- every future **Phase B** pass re-reads every already-observed binding;
+- any **later stable different** snapshot then becomes a `source_snapshot_changed`
+  incident + `observed_conflicted`;
+- the **original observation is never rewritten**.
+
+S2 makes **no** claim that "the committed decision matches the final / current
+source state", nor any equivalent cross-DB atomicity claim. The observation
+records *the snapshot that was coherent at re-verification*; divergence
+afterwards is detected, not prevented.
 
 ## 17. Settlement-projection rebuild + durable shadow DB lifetime
 
@@ -734,19 +974,45 @@ invariant is **settlement-projection rebuild**:
   incident `id`, and `raised_at` are **local metadata** and are **excluded** from
   the comparison. **No byte-identical-row claim.**
 
-**Durable shadow `orchestration.db` lifetime / path model:**
+- **Settlement-projection rebuild preserves** `run_binding`, `run_reservation`,
+  `execution_meta.shadow_orchestration_path`, and the durable shadow
+  `orchestration.db` file itself. It touches **only** the two S2 projection
+  tables.
 
-- The shadow `orchestration.db` used for convergence **MUST** live **outside**
-  the `DisposableShadowRoot` (whose `cleanup()` `rmSync`s the whole tree). It has
-  a **stable, configured** path supplied to the S2 composition root.
-- On first run the composition root persists that absolute path in the existing
-  `execution_meta` table under key `shadow_orchestration_path`. On any later run
-  (including after a process restart) it **reads that key back**:
-  - key absent → persist the supplied path;
-  - key present and **==** supplied path → proceed;
-  - key present and **!=** supplied path → **fail closed**
-    (`ShadowSourcePathMismatchError`) — S2 does not silently converge against a
-    different source DB than the one its projection was built from.
+**Durable shadow `orchestration.db` — one stable DB, shared across restarts:**
+
+There is **one** durable shadow orchestration DB for this Maestro
+shadow-migration environment, shared by the ORCA-S1 shadow **writer** and the
+ORCA-S2 read-only **reader** across process restarts. It is the point-in-time
+authority S2 converges from.
+
+- It **MUST** live **OUTSIDE** `DisposableShadowRoot`. `DisposableShadowRoot`'s
+  `cleanup()` (`rmSync` of the whole tree) **must never delete it** —
+  `disposable-shadow-root.ts` stops returning / owning this path (§2, §18).
+- Its canonical configured absolute path is persisted in
+  `execution_meta.shadow_orchestration_path` (existing key/value table — no new
+  column). `executeShadowIdentityObservationSlice` is the single place that
+  reads the config, persists the binding, and constructs both the writer
+  `OrchestrationDb` and the read-only `ReadOnlyShadowSettlementSource` against
+  that one path.
+
+**Startup rules:**
+
+- **First initialization (empty brand-new environment):** no
+  `shadow_orchestration_path` binding exists *and* the environment has no
+  durable bindings/history → persist the configured durable path **before**
+  first use, then create the DB there. This is the *only* path on which S2
+  creates the shadow orchestration DB file.
+- **Later startup (recovery):**
+  - configured path **==** persisted path → continue;
+  - configured path **!=** persisted path → **fail closed**
+    `ShadowSourcePathMismatchError` — S2 does not converge against a different
+    source DB than the one its projection was built from;
+  - persisted path present but the **database file is missing** → **fail closed**
+    `ShadowSettlementSourceMissingError` (named) — S2 does **not** silently
+    create a replacement DB when durable bindings / history exist;
+  - persisted path present and file present → open it (writer read-write for the
+    S1 path, `ReadOnlyShadowSettlementSource` genuinely read-only for S2).
 - A `:memory:` shadow DB is permitted **only** for single-process tests; any
   restart-safety or rebuild test uses a real file path outside the disposable
   root.
@@ -759,12 +1025,27 @@ invariant is **settlement-projection rebuild**:
   `status` mutation `observed → observed_conflicted` + `conflicted_at`);
 - writes to `settlement_incident` (insert only; `resolved_at` /
   `resolution_note` are the future operator tool's, §13.1);
-- the `execution_meta.shadow_orchestration_path` key (§17);
+- the `execution_meta.shadow_orchestration_path` key — first-init persist +
+  restart re-verify, failing closed with `ShadowSourcePathMismatchError` /
+  `ShadowSettlementSourceMissingError` (§17);
 - **read-only** `SELECT`s against the shadow `orchestration.db` via the
   `DurableSettlementSource` adapter (§14);
-- the modification of `reconcileIncompleteReservations`'s terminal branch (§15);
-- the additive `withImmediateTransaction` seam (§16.1);
+- the new `reconcileShadowExecutionState` coordinator and the modification of
+  **four** existing ORCA-S1 files at the composition / application seam (§2, §15):
+  `reconcile-incomplete-reservations.ts` (terminal-Dispatch branch no longer
+  unconditionally abandons), `shadow-observation-service.ts` (coordinator +
+  ordering threaded through `runShadowObservation`), `disposable-shadow-root.ts`
+  (no longer owns the durable convergence DB lifetime),
+  `shadow-identity-observation.ts` (`executeShadowIdentityObservationSlice`
+  composes the out-of-root durable DB path + writer/reader construction + the
+  cleanup ownership split);
+- the additive `withImmediateTransaction` seam, incl. bounded `SQLITE_BUSY`
+  retry → `EXECUTION_STORE_BUSY_RETRYABLE` (§16.1);
 - the v2 → v3 Execution-schema upgrade (§11.1).
+
+None of the above is an authority transfer and none is an upstream Orca
+modification — ORCA-S1's accepted authority and reconciliation semantics are
+unchanged (§6, §25).
 
 **S2 does NOT own and does NOT perform:**
 
@@ -792,11 +1073,13 @@ invariant is **settlement-projection rebuild**:
 | Latest bound shadow Dispatch **terminal** in `orchestration.db` | **Converge** → `settlement_observation` (Phase A). *(New.)* |
 | Terminal, but no `DurableSettlementSnapshot` can be built (bad `tasks.result` JSON / structurally missing field) | `settlement_incident(kind='invalid_or_unresolvable_source')`; binding blocked; **no invented outcome** (§F.7). |
 | Latest Dispatch for the task is not the bound one / wrong `run_id` / foreign correlation marker | `settlement_incident(kind='foreign_dispatch')`; binding blocked (§F.5). |
-| Phase B re-read digest differs from the stored `source_digest` | `settlement_incident(kind='source_snapshot_changed')` + `observation.status → 'observed_conflicted'`; existing observation source columns preserved (§13, G5). |
-| Source DB kept changing across all bounded re-verify retries | `source_snapshot_changed` incident with the latest digest; no observation this pass (§16.3). |
+| Phase B **stable** re-read digest differs from the immutable stored `source_digest` (already-observed binding) | `settlement_incident(kind='source_snapshot_changed')` + `observation.status → 'observed_conflicted'`; existing observation source columns preserved (§13, G5). |
+| Source snapshot kept changing across all bounded re-verify retries (Phase A **or** Phase B) | **`SOURCE_UNSTABLE_RETRYABLE`** — no observation, **no incident**, no `status` mutation, binding **not** blocked; surfaced in the report; next sweep may retry (§16.3). Proves only "no stable point-in-time snapshot", not a conflict. |
+| Execution write transaction not acquired within the bounded `SQLITE_BUSY` retry budget | **`EXECUTION_STORE_BUSY_RETRYABLE`** — no durable row of any kind, no partial state, **no incident**, binding **not** blocked; surfaced in the report; next sweep may retry (§16.1). |
 | Any exception during the sweep for one binding | Caught; recorded as a `sweepError` in the report; sweep continues with the next binding; `data/app.db` provably untouched (ORCA-S1 I5 inherited); authority still `AICONTROL_NATIVE`. |
 | `data/app.db` missing / has a `-wal` or `-shm` sidecar at start | `DbGuardError`; S2 does not run (ORCA-S1 gate 9 inherited). |
-| `shadow_orchestration_path` disagrees with the persisted `execution_meta` value | `ShadowSourcePathMismatchError`; S2 does not run (§17). |
+| Configured `shadow_orchestration_path` disagrees with the persisted `execution_meta` value | `ShadowSourcePathMismatchError`; S2 does not run (§17). |
+| Persisted `shadow_orchestration_path` present but the DB **file is missing** and durable bindings/history exist | `ShadowSettlementSourceMissingError`; S2 does not run and does **not** create a replacement DB (§17). |
 
 ## 20. Acceptance criteria
 
@@ -807,7 +1090,7 @@ invariant is **settlement-projection rebuild**:
    are Execution-owned; no Governance / Delivery table read or written; **no
    `parity_observation` write anywhere in S2**.
 3. **TDD / RED evidence** — for I-S2-1..5, P-S2-1..6, and each crash window
-   G1–G5, a failing test captured **before** the behaviour it checks. Evidence:
+   G1–G6, a failing test captured **before** the behaviour it checks. Evidence:
    `slices/durable-settlement-observation/RED-EVIDENCE.md`.
 4. **Zero authoritative writes** — call-site audit + runtime test: the whole
    slice writes nothing to `data/app.db` (SHA-256 unchanged, no sidecars).
@@ -839,9 +1122,11 @@ invariant is **settlement-projection rebuild**:
    `observed_outcome_json` / `provenance_json` **byte-unchanged**.
 10. **Restart safety** — the separate-child-process harness: the child durably
     settles the shadow Dispatch and checkpoints/closes that DB, then is
-    SIGKILLed; the parent runs `convergeSettlements`; asserts convergence, a
-    single observation, correct `source_digest` + provenance, `data/app.db`
-    byte-identical, authority `AICONTROL_NATIVE`. Windows **G1–G5 each covered**.
+    SIGKILLed; the parent runs `reconcileShadowExecutionState` (converge phases
+    1–2, abandon phase 3); asserts convergence, a single observation, correct
+    `source_digest` + provenance, `data/app.db` byte-identical, authority
+    `AICONTROL_NATIVE`. Windows **G1–G6 each covered**, including G6 (a kill
+    during a retryable loop leaves no durable row and no block).
 11. **Identity / provenance** — a wrong / stale / foreign **latest** Dispatch
     **cannot** produce an observation (produces a `foreign_dispatch` incident);
     every observation's `orca_dispatch_id` equals the bound one; every
@@ -849,15 +1134,21 @@ invariant is **settlement-projection rebuild**:
     containing only durable facts; `run_binding` is never heuristically
     reconstructed.
 12. **Incident, not invention** — adversarial tests induce each incident `kind`
-    (`foreign_dispatch`, `source_snapshot_changed`,
-    `invalid_or_unresolvable_source`); each is recorded, keyed by
+    (`foreign_dispatch`, `invalid_or_unresolvable_source`,
+    `source_snapshot_changed`); each is recorded, keyed by
     `(correlation_id, kind, evidence_digest)`, blocks its binding, is **never**
     auto-resolved, and a later differing evidence snapshot produces a **new** row
-    rather than overwriting (§13).
-13. **Atomicity / concurrency** — a test runs two `convergeSettlements` passes
-    concurrently against the same stores over one binding and asserts exactly one
-    `settlement_observation`, no `sweepError`, and **never** a
-    first-observation + incident pair from the same snapshot (§16).
+    rather than overwriting (§13). And the negative: a source that changes during
+    the double-read, a `SQLITE_BUSY`, and a transaction-acquisition failure each
+    produce a **retryable result and no `settlement_incident` row** (§13, §16).
+13. **Atomicity / concurrency** — a **two-process / concurrent-sweep** test runs
+    two convergence passes against the same stores over one binding and asserts:
+    exactly one `settlement_observation` (via `BEGIN IMMEDIATE` serialisation +
+    in-transaction precheck, **not** by assuming which writer hits the PK
+    first), no `sweepError`, **never** a first-observation + incident pair from
+    the same snapshot; and that a forced `SQLITE_BUSY` exhaustion yields
+    `EXECUTION_STORE_BUSY_RETRYABLE` with no partial state and the same stable
+    snapshot still converging to at most one observation on the retry (§16).
 14. **Operational DB guard** — `data/app.db` SHA-256 ==
     `13E6571177CD027D618AA294B7A26DA5C07C1370123C236E1706F6F235E65178` before and
     after; no `-wal` / `-shm` residual; aiControlCenter `DB_BASELINE.json`
@@ -867,11 +1158,26 @@ invariant is **settlement-projection rebuild**:
     ends with `execution_meta.schema_version == '3'`; a v2 store upgraded to v3
     and a freshly created v3 store are **structurally identical**; no S1 column
     dropped, renamed, or added.
-16. **Unified reconciliation** — a test exercises every row of the §15 state
-    machine and proves: a terminal bound Dispatch converges (never abandoned);
-    convergence runs before any abandon decision; the same durable facts never
-    reach both `abandon` and `converge`; the full ORCA-S1 acceptance suite passes
-    **byte-unchanged** against the same Maestro base.
+16. **Unified reconciliation** — a test exercises every row of the §15.2 state
+    machine through the single `reconcileShadowExecutionState` coordinator and
+    proves: a terminal bound Dispatch with a **stable** snapshot converges (never
+    abandoned); phases 1–2 (converge + verify) run to completion **before** any
+    phase-3 abandon decision; there is **no** separate unconditional abandon
+    pass; **no same durable stable snapshot ever reaches both `abandon` and
+    `converge`**; a `SOURCE_UNSTABLE_RETRYABLE` / `EXECUTION_STORE_BUSY_RETRYABLE`
+    result does **not** cause the still-incomplete reservation to be abandoned;
+    and the full ORCA-S1 acceptance suite passes **byte-unchanged** against the
+    same Maestro base despite the four S1 composition-seam file modifications.
+17. **Durable shadow DB lifetime** — tests prove: the durable shadow
+    `orchestration.db` lives outside `DisposableShadowRoot` and survives its
+    `cleanup()`; first-init persists `execution_meta.shadow_orchestration_path`
+    before first use; a configured-vs-persisted path mismatch fails closed with
+    `ShadowSourcePathMismatchError`; a persisted path whose DB file is missing
+    (with durable bindings present) fails closed with
+    `ShadowSettlementSourceMissingError` and **no** replacement DB is created; a
+    settlement-projection rebuild preserves `run_binding`, `run_reservation`,
+    the path key, and the DB file; rollback deletes only the two S2 projection
+    tables and never the durable source DB.
 
 ## 21. TDD targets
 
@@ -879,10 +1185,14 @@ invariant is **settlement-projection rebuild**:
   Phase B digest verification, incident classification, converge-vs-defer;
   idempotent; pure over `(Execution store state, shadow orchestration.db state,
   now)`.
-- `buildDurableSettlementSnapshot` + `sourceDigest` (domain) — canonical
-  serialisation is stable and field-order-fixed; `undefined → null`; digest is
-  `SHA-256` of the canonical form; two structurally-equal snapshots ⇒ equal
-  digest; any field change ⇒ different digest.
+- `buildDurableSettlementSnapshot` + `canonicalSerialize` + `sourceDigest`
+  (domain) — the **Execution-owned** canonical serialiser (not an import of
+  Orca's module-private `canonicalPayload`): stable, field-order-fixed;
+  `undefined → null`; digest is `SHA-256` of the canonical form; two
+  structurally-equal snapshots ⇒ equal digest; any field change ⇒ different
+  digest. Plus a **compatibility / ratchet test** that pins `canonicalSerialize`
+  against Orca `canonicalPayload`'s normalization semantics and fails loudly on
+  drift.
 - `settlementObservedOutcome` (domain) — pure map `DurableSettlementSnapshot →
   { terminalOutcome, exitDisposition, cancellation }`; `cancelled` marker →
   `cancelled` / `no_exit`; missing classifying field ⇒ throws (drives
@@ -899,21 +1209,40 @@ invariant is **settlement-projection rebuild**:
   fileMustExist: true`; resolves latest dispatch for the task; equality-checks
   against the bound ids; returns the tagged `DurableSettlementRead`; issues no
   DDL / pragma / write; creates no sidecar.
-- `withImmediateTransaction` (infrastructure) — `BEGIN IMMEDIATE`; commit on
-  success; rollback on throw; the read→verify→retry protocol (§16.3) with the
-  bounded attempt count.
+- `withImmediateTransaction` (infrastructure) — `BEGIN IMMEDIATE` (serialises
+  writers); commit on success; rollback on throw; **bounded `SQLITE_BUSY` retry
+  on lock acquisition → `EXECUTION_STORE_BUSY_RETRYABLE` on exhaustion, no
+  transaction left open, no partial state**; the read → re-verify → retry
+  protocol (§16.3) with the bounded attempt count, returning
+  `SOURCE_UNSTABLE_RETRYABLE` on exhaustion (no incident, no observation
+  mutation). A two-process case is required (criterion 13).
 - `assertObservationConverged` (domain) — throws unless provenance is complete,
   dispatch identity matches, and `observed_outcome_json` is a valid
   `SettlementObservedOutcome`.
-- reconcile composition — **modify** `reconcileIncompleteReservations`: its
-  terminal-Dispatch branch delegates to `convergeSettlements`; it no-ops on an
-  already-observed / `observed_conflicted` / incident-blocked reservation; it
-  still abandons never-created and stale-non-terminal.
+- `reconcileShadowExecutionState` (application, **new**) — the single ordering
+  authority: phase 1 `convergeSettlements` Phase A, phase 2 Phase B, phase 3 the
+  modified `reconcileIncompleteReservations`. Proves phases 1–2 complete before
+  phase 3; no separate abandon pass; retryable results do not trigger abandon.
+- **modify** `reconcileIncompleteReservations` (`reconcile-incomplete-reservations.ts`)
+  — its terminal-Dispatch case is no longer unconditionally abandoned (handled
+  by phase 1); it no-ops on an already-observed / `observed_conflicted` /
+  incident-blocked reservation; it still abandons never-created and
+  stale-non-terminal.
+- **modify** `shadow-observation-service.ts` — `runShadowObservation` calls
+  `reconcileShadowExecutionState` where it called `reconcileIncompleteReservations`,
+  threading the convergence / source-port dependencies.
+- **modify** `disposable-shadow-root.ts` — remove ownership of the durable
+  convergence DB path/lifetime; `cleanup()` must not touch the shared durable
+  shadow `orchestration.db`.
+- **modify** `shadow-identity-observation.ts` — `executeShadowIdentityObservationSlice`
+  composes the out-of-root durable shadow DB path (config → `execution_meta`
+  persist/re-verify → `ShadowSourcePathMismatchError` /
+  `ShadowSettlementSourceMissingError`), constructs the writer `OrchestrationDb`
+  **and** the read-only `ReadOnlyShadowSettlementSource` against that one path
+  (never an `OrchestrationDb` for the reader), wires the guards, and invokes
+  `reconcileShadowExecutionState`. It remains the **single** composition
+  boundary — there is no separate S2 startup root.
 - `migrateExecutionStore` v2 → v3 — versioned upgrade (§11.1).
-- The S2 composition root (`durable-settlement-observation.ts`) — supplies the
-  stable out-of-root shadow DB path, persists/rediscovers it via
-  `execution_meta`, constructs the read-only source (never an `OrchestrationDb`),
-  the guards, and runs convergence **before** abandon.
 
 ## 22. Required executable evidence
 
@@ -923,14 +1252,25 @@ invariant is **settlement-projection rebuild**:
   convergence proof (criterion 7).
 - `durable-settlement-observation.two-phase-idempotency.test.ts` — criteria 8, 9.
 - `durable-settlement-observation.restart.test.ts` + `settlement-converge-child.mjs`
-  — criterion 10, windows G1–G5.
+  — criterion 10, windows G1–G6.
 - `read-only-shadow-settlement-source.test.ts` — criterion 5 (readonly open, no
   DDL/pragma/write, no sidecar, latest-dispatch resolution, foreign rejection).
-- `settlement-atomicity.test.ts` — criterion 13 (concurrent sweeps, one
-  observation, no observation+incident from one snapshot).
+- `settlement-atomicity.test.ts` — criterion 13 (two-process concurrent sweeps,
+  one observation via `BEGIN IMMEDIATE` serialisation, no observation+incident
+  from one snapshot, forced `SQLITE_BUSY` → `EXECUTION_STORE_BUSY_RETRYABLE` with
+  no partial state).
+- `settlement-source-instability.test.ts` — a source snapshot that keeps changing
+  across the bounded re-verify window yields `SOURCE_UNSTABLE_RETRYABLE` with
+  **no** `settlement_incident`, **no** observation mutation, binding **not**
+  blocked, result surfaced in the report; a Phase A binding never produces
+  `source_snapshot_changed`.
+- `shadow-orchestration-db-lifetime.test.ts` — criterion 17 (out-of-root
+  survival of `cleanup()`, first-init persist, `ShadowSourcePathMismatchError`,
+  `ShadowSettlementSourceMissingError`, projection-rebuild preservation set).
 - `settlement-incident.adversarial.test.ts` — criterion 12, each incident `kind`,
-  non-overwriting `evidence_digest` key (clearly labelled adversarial; never
-  presented as observed parity evidence).
+  non-overwriting `evidence_digest` key, plus the negative cases (transient
+  instability / busy / acquisition failure raise **no** incident) — clearly
+  labelled adversarial; never presented as observed parity evidence.
 - `durable-settlement-observation.acceptance.test.ts` — the frozen end-to-end:
   the §10 sample, every binding converged from durable state, `source_digest` +
   provenance asserted, DB guard, authority unchanged, ORCA-S1 suite still green,
@@ -946,8 +1286,10 @@ invariant is **settlement-projection rebuild**:
 - Any authority transfer (`ORCA_DELEGATED` / `ORCA_AUTHORITATIVE`); any
   `data/app.db` projection of terminal state; any Governance AgentRun terminal
   write; `finalizeRunOnce` reuse or "projection-only mode" (§G item 6).
-- `onDispatchSettled` / any notification hook or coordinator process (§F.3–F.4
-  make it optional; ORCA-S1 already defers it). The sweep is the only path.
+- `onDispatchSettled` / any notification hook or long-lived coordinator **OS
+  process** (§F.3–F.4 make it optional; ORCA-S1 already defers it). The sweep is
+  the only path; `reconcileShadowExecutionState` is an in-process application
+  function invoked by the existing composition boundary, not a process.
 - §H delegated side-effect ownership (teardown, worktree finalization ownership,
   execution-attempt closure, terminal-event emission, client completion signal,
   `base_commit` / `candidate_head` capture).
@@ -969,39 +1311,68 @@ invariant is **settlement-projection rebuild**:
 
 ## 24. Rollback
 
-Pure additive + advisory. To roll back: stop calling `convergeSettlements`; drop
-`settlement_observation`, `settlement_incident`, and the
-`execution_meta.shadow_orchestration_path` key (or leave them — inert).
-`data/app.db` and `orchestration.db` were never written by S2, so there is **no
-authority rollback**. ORCA-S1 is unaffected — its `reconcileIncompleteReservations`
-change is a strict superset (terminal-Dispatch branch now converges instead of
-abandons); reverting it restores the ORCA-S1 behaviour exactly. No
-`parity_observation` row was written, so there is nothing to clean there.
-`EXECUTION_SCHEMA_VERSION` may remain at 3 (v3 is a strict superset of v2 —
-tables only).
+Advisory + additive-projection. To roll back: stop invoking
+`reconcileShadowExecutionState`'s convergence phases (or revert
+`shadow-observation-service.ts` to call `reconcileIncompleteReservations`
+directly); drop **only** `settlement_observation` and `settlement_incident` (or
+leave them — inert).
+
+- The **durable shadow `orchestration.db` is NOT deleted** by rollback. It is
+  Orca-owned durable state that ORCA-S1's writer also uses; it may be **retained
+  as evidence** and removed only by an explicit later operator / governed
+  cleanup procedure — never automatically.
+- The `execution_meta.shadow_orchestration_path` key may be left in place (inert)
+  or cleared by that same governed procedure.
+- `data/app.db` and `orchestration.db` were never **written** by S2, so there is
+  **no authority rollback**.
+- The four ORCA-S1 composition-seam file changes
+  (`reconcile-incomplete-reservations.ts`, `shadow-observation-service.ts`,
+  `disposable-shadow-root.ts`, `shadow-identity-observation.ts`) are a plain
+  `git revert` of the S2 change — the terminal-Dispatch branch returns to
+  unconditional abandon and ORCA-S1 behaviour is restored **exactly**. This is a
+  code revert, not an authority or data rollback; S1's accepted semantics were
+  never changed.
+- No `parity_observation` row was written, so there is nothing to clean there.
+- `EXECUTION_SCHEMA_VERSION` may remain at 3 (v3 is a strict superset of v2 —
+  tables only).
 
 ## 25. Upstream-coupling budget
 
-**`SMALL_ADDITIVE_ORCA_READ_API` / schema-coupled read seam.** New files only
-under `src/main/execution/` — the `DurableSettlementSource` port + its
-`ReadOnlyShadowSettlementSource` adapter, the `convergeSettlements` service, the
-two SQLite stores, the `withImmediateTransaction` seam — plus the versioned
-schema-v3 bump in the Execution-owned `execution-schema.ts` (additive DDL only)
-and the modification of the Execution-owned `reconcile-incomplete-reservations.ts`
-terminal branch. **Zero Orca-core file changed. Zero Orca-core semantic
-modification. Zero aiControlCenter file changed. No `SMALL_HOOK`.**
+**`EXECUTION_OWNED_SCHEMA_COUPLED_READER`.** S2 adds **no Orca API** and changes
+**no Orca core surface**. The reader:
 
-The read seam issues plain `SELECT` against three Orca tables at the vendored
-base — `tasks`, `dispatch_contexts`, `attempt_observation_facts` — and depends on
-their column names there. It does **not** call any `OrchestrationDb` method and
-does **not** construct `OrchestrationDb`. A drift in those three tables' columns
-is a maintenance signal caught by the adapter's own tests (Appendix B).
+- lives under `src/main/execution/infrastructure/`;
+- opens the **existing** shadow orchestration SQLite database **directly
+  read-only**;
+- issues **SELECT-only** over the required Orca-owned tables (`tasks`,
+  `dispatch_contexts`, `attempt_observation_facts` at the vendored base);
+- makes **no Orca API / core source change**;
+- performs **no migration / DDL / trigger / write / journal-mode mutation**;
+- has **explicit** table/column coupling, guarded by **schema-drift ratchet
+  tests** that fail loudly if the vendored Orca schema changes (Appendix B);
+- does **not** call any `OrchestrationDb` method and does **not** construct
+  `OrchestrationDb`.
 
-If, during implementation, the sweep is found to genuinely need an Orca read API
-that does not exist at the base (e.g. "list dispatches settled since T" for
-scale), that is a further `SMALL_ADDITIVE_ORCA_READ_API` decision recorded as an
-amendment to this spec — **not assumed here**. The frozen baseline mechanism is a
-bounded per-binding read over `run_binding`.
+**Overall product-code coupling remains additive within Maestro — EXCEPT** the
+explicit ORCA-S1 Execution-composition / application seam changes:
+`reconcile-incomplete-reservations.ts`, `shadow-observation-service.ts`,
+`disposable-shadow-root.ts`, `shadow-identity-observation.ts`, plus the
+versioned schema-v3 bump in `execution-schema.ts` (additive DDL only) and the
+additive `withImmediateTransaction` method in `sqlite-execution-store.ts`. These
+are **Maestro-owned Execution files** — **not** an upstream Orca modification and
+**not** an authority transfer (§6, §18). New S2-owned files: the
+`DurableSettlementSource` port + `ReadOnlyShadowSettlementSource` adapter, the
+`convergeSettlements` service, the `reconcileShadowExecutionState` coordinator,
+the two SQLite stores.
+
+**Zero Orca-core file changed. Zero Orca-core semantic modification. Zero
+aiControlCenter file changed. No `SMALL_HOOK`.**
+
+If, during implementation, the sweep is found to genuinely need an Orca **read
+API** that does not exist at the base (e.g. "list dispatches settled since T" for
+scale), that is a separate additive decision recorded as an amendment to this
+spec — **not assumed here**, and still `ADDITIVE` with no upstream merge. The
+baseline mechanism is a bounded per-binding read over `run_binding`.
 
 ## 26. Independent-acceptance attack surfaces
 
@@ -1013,9 +1384,19 @@ attack:
 2. **Invented state** — can any incident path be coerced into writing a
    `settlement_observation` with a fabricated outcome (§F.7,
    `invalid_or_unresolvable_source`)?
-3. **Digest bypass** — can a differing Phase B snapshot cause a silent re-observe
-   or a `source_*` column rewrite instead of a `source_snapshot_changed`
+3. **Digest bypass** — can a **stable** differing Phase B snapshot cause a silent
+   re-observe or a `source_*` column rewrite instead of a `source_snapshot_changed`
    incident + `observed_conflicted`?
+3a. **Transient instability mis-classified as a conflict** — make the source
+   snapshot change *during* the read → re-verify double-read and stay unstable
+   across the retry budget. Confirm the result is `SOURCE_UNSTABLE_RETRYABLE`
+   with **no** `settlement_incident`, **no** `settlement_observation` mutation,
+   the binding **not** blocked, and the result surfaced in the report — not a
+   `source_snapshot_changed` incident, and never on a Phase A binding (§16.3).
+3b. **`SQLITE_BUSY` mis-handling** — force write-lock contention to exhaust the
+   bounded busy-retry budget. Confirm `EXECUTION_STORE_BUSY_RETRYABLE` with no
+   durable row, no incident, no partial state, no block; and that the design does
+   **not** depend on which writer reaches the observation PK first (§16.1).
 4. **Foreign-dispatch projection** — seed the shadow `orchestration.db` so the
    **latest** Dispatch for the task is bound to a *different* correlation;
    confirm S2 raises `foreign_dispatch` and writes no observation (P-S2-4).
@@ -1028,15 +1409,23 @@ attack:
 7. **Orca-type leak** — any `DispatchContextRow` / `TaskRow` / `RunRow` reaching
    `domain/` or `application/`? (The adapter returns a plain
    `DurableSettlementRead`.)
-8. **Shadow / real DB confusion** — can S2 be pointed at the user's real
-   `orchestration.db`? Is the shadow path stable, out-of-disposable-root, and
-   re-verified against `execution_meta` on restart (§17)?
+8. **Shadow / real DB confusion + durable-DB lifetime** — can S2 be pointed at
+   the user's real `orchestration.db`? Is the shadow path stable,
+   out-of-`DisposableShadowRoot`, and re-verified against `execution_meta` on
+   restart? Does `DisposableShadowRoot.cleanup()` still reach the durable shadow
+   DB? Does a missing DB file at a persisted path fail closed
+   (`ShadowSettlementSourceMissingError`) rather than silently creating a
+   replacement? Does rollback or a settlement-projection rebuild ever delete it
+   (§17, §24)?
 9. **DB guard totality** — `data/app.db` SHA-256 + sidecars asserted before and
    after, **including on every incident path and every crash-window path**.
-10. **ORCA-S1 regression** — S1 suite byte-unchanged and green; the reconcile
-    change (abandon → converge for the terminal-Dispatch branch) never abandons a
-    genuinely-settled run and never converges a genuinely-dead one; convergence
-    provably runs before abandon.
+10. **ORCA-S1 regression** — S1 acceptance suite byte-unchanged and green despite
+    the four S1 composition-seam file edits; the reconcile change (abandon →
+    converge for the terminal-Dispatch branch, now via
+    `reconcileShadowExecutionState`) never abandons a genuinely-settled run and
+    never converges a genuinely-dead one; convergence phases provably run before
+    abandon; there is no separate unconditional abandon pass; S1's accepted
+    authority/semantics are unchanged and no authority transfer occurs.
 11. **`parity_observation` immutability** — does S2 write, alter, or add a column
     to `parity_observation` anywhere? (It must not — §18, §23.)
 12. **Local metadata leaking into identity** — is `observed_at` / `first_seen_at`
@@ -1052,11 +1441,16 @@ attack:
 
 - **I-S2-1** — `convergeSettlements` is a pure function of `(Execution store
   state, shadow orchestration.db state, now)`. Running it N times ≡ running it
-  once, for the source-derived observation set (§F.6).
+  once, for the source-derived observation set (§F.6). A retryable result
+  (`SOURCE_UNSTABLE_RETRYABLE`, `EXECUTION_STORE_BUSY_RETRYABLE`) writes nothing
+  durable and leaves the binding for a later pass — it does not perturb the
+  fixed point.
 - **I-S2-2** — `settlement_observation` is **write-once** per `correlation_id`.
   The only permitted mutation is `status: 'observed' → 'observed_conflicted'`
-  (+ `conflicted_at`) driven by a Phase B digest mismatch. Every `source_*`
-  column, `observed_outcome_json`, and `provenance_json` are immutable.
+  (+ `conflicted_at`) driven by a Phase B **stable** digest mismatch against an
+  already-persisted observation. Every `source_*` column, `observed_outcome_json`,
+  and `provenance_json` are immutable. A source that is merely unstable across
+  the double-read never mutates the row.
 - **I-S2-3** — a **settlement-projection rebuild** (§17) + re-run against the
   same `orchestration.db` reproduces **semantically equivalent**
   `settlement_observation` rows (`source_digest`, `orca_dispatch_id`,
@@ -1068,9 +1462,13 @@ attack:
   `duplicate: true`, same terminal status, same `tasks.result`) yields the same
   `source_digest` → **zero** additional `settlement_observation` rows.
 - **I-S2-5** — concurrent `convergeSettlements` passes (two processes, same
-  stores) produce at most one `settlement_observation` per binding (PK; the
-  loser's INSERT is a no-op) and never an observation + incident from one
-  snapshot (§16).
+  stores) produce at most one `settlement_observation` per binding. `BEGIN
+  IMMEDIATE` serialises the writers and the second writer's in-transaction
+  precheck sees the first observation and no-ops; the `correlation_id` PK is a
+  backstop, not the mechanism. Never an observation + incident from one
+  snapshot. A write-lock contention that exhausts the bounded busy-retry budget
+  returns `EXECUTION_STORE_BUSY_RETRYABLE` with no partial state; the retry still
+  converges to at most one observation (§16).
 
 ## Identity / provenance invariants
 
@@ -1127,20 +1525,44 @@ attack:
 - **`OrcaExecutionPlane`** (`infrastructure/orca-execution-plane.ts`) — unchanged
   by S2. Its `cache: Map` is a within-call cache only, never correctness
   authority; S2 does not read it (§26 attack 7).
-- **Dedicated shadow `OrchestrationDb`** — ORCA-S1's composition root constructs
-  its own for the shadow *writer*. S2's *reader* opens the **same file path**
-  read-only and never constructs `OrchestrationDb`. S2 uses coordinator pane key
+- **Durable shadow `OrchestrationDb`** — one stable DB for this shadow-migration
+  environment, shared across restarts (§17). ORCA-S1's *writer* constructs an
+  `OrchestrationDb` over it; S2's *reader* opens the **same file path** genuinely
+  read-only and never constructs `OrchestrationDb`. `executeShadowIdentityObservationSlice`
+  composes both against the one out-of-root path. S2 uses coordinator pane key
   namespace `tab_orca_s2_shadow:*` where it needs one.
-- **`reconcileIncompleteReservations`** (`application/`) — runs first inside
-  `runShadowObservation`; **currently abandons every incomplete reservation**.
-  **S2 modifies its terminal-Dispatch branch to converge** (§15) — this is the
-  one ORCA-S1 application file S2 changes.
-- **`DisposableShadowRoot`** — reused for shadow *worktrees*. **The shadow
-  `orchestration.db` S2 converges against must NOT live under this root** (§17);
-  its `cleanup()` `rmSync`s the tree.
+
+**ORCA-S1 files S2 modifies at the Execution composition / application seam** —
+no authority transfer; S1's accepted authority and reconciliation semantics are
+unchanged (§2, §6, §15, §18, §25):
+
+- **`reconcile-incomplete-reservations.ts`** (`application/`) —
+  `reconcileIncompleteReservations` runs first inside `runShadowObservation` and
+  **currently abandons every incomplete reservation**. S2 changes it so the
+  terminal-Dispatch case is **no longer unconditionally abandoned** — it becomes
+  phase 3 of `reconcileShadowExecutionState`, run only after convergence.
+- **`shadow-observation-service.ts`** (`application/`) — `runShadowObservation`
+  is rewired to call the new `reconcileShadowExecutionState` coordinator (which
+  threads the convergence / `DurableSettlementSource` dependencies and enforces
+  converge → verify-observed → abandon ordering) where it called
+  `reconcileIncompleteReservations` directly.
+- **`disposable-shadow-root.ts`** (`infrastructure/`) — currently owns
+  `shadowOrchestrationDbPath()` under a tree that `cleanup()` `rmSync`s. S2
+  removes its ownership of the **durable** convergence DB path/lifetime; the
+  durable shadow `orchestration.db` lives outside this root and `cleanup()` must
+  never reach it. Disposable *worktrees* stay under it, unchanged.
+- **`shadow-identity-observation.ts`** (`slices/shadow-identity-observation/`) —
+  `executeShadowIdentityObservationSlice` remains the **single** composition
+  boundary and is extended: it resolves the durable out-of-root shadow DB path
+  (config → `execution_meta.shadow_orchestration_path` persist / re-verify →
+  `ShadowSourcePathMismatchError` / `ShadowSettlementSourceMissingError`),
+  constructs the writer `OrchestrationDb` **and** the read-only
+  `ReadOnlyShadowSettlementSource` against it, owns the cleanup split (durable DB
+  not disposed with the root), and invokes `reconcileShadowExecutionState`.
+
 - **`assertExecutionStorePathNotAlias`** (B4), **`assertNoSqliteSidecars`** +
   **`sha256File`** (gate 9), **`shadow-run-child.mjs`** (B10 separate-process
-  SIGKILL harness) — all reused.
+  SIGKILL harness) — all reused unchanged.
 
 ## Appendix B — Orca read seams consumed (SELECT-only, present at Maestro base)
 
@@ -1198,12 +1620,12 @@ vendored Orca base by an amount this spec does not pin (it changes over time and
 is irrelevant to S2); it is **NOT** integrated by this task or by the S2
 implementation. Integrating upstream drift is a separate, explicitly reviewed
 `upstream-integration` task (§P thin-fork / non-rewrite discipline). If S2
-implementation discovers a genuine need for a new Orca read API for scale, that
-is a `SMALL_ADDITIVE_ORCA_READ_API` amendment (§25) — still ADDITIVE, still no
-upstream merge.
+implementation discovers a genuine need for a **new Orca read API** for scale,
+that is a separate additive amendment (§25) — still ADDITIVE, still no upstream
+merge, and still not a change to any Orca core surface.
 
 ---
 
-_State class: `FIX_READY_FOR_REREVIEW` (candidate — corrections applied, awaiting
-independent re-review, then freeze)._
-_Display verdict: `MAESTRO_ORCA_S2_ARCHITECTURE_CORRECTED_READY_FOR_REREVIEW`._
+_State class: `FIX_READY_FOR_REREVIEW` (candidate — focused corrections applied,
+awaiting independent re-review, then freeze)._
+_Display verdict: `MAESTRO_ORCA_S2_ARCHITECTURE_FINAL_CORRECTIONS_READY_FOR_REREVIEW`._

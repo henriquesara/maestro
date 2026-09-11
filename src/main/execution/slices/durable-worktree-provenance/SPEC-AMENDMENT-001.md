@@ -94,7 +94,7 @@ This amendment adds no new obligation. It makes the DDL match obligations
 `SPEC.md` already stated:
 
 - §3(b) — `provenance_json` as the exact source citation, unchanged.
-- §5 — the evidence-bundle analogy, unchanged.
+- §6 — the state-transition immutability reference, unchanged.
 - §7.1 prose — `provenance_json` named among the columns immutable after Phase
   A, unchanged (now backed by an actual column).
 - §12 PROV-1 — `base_commit` / `candidate_head` / `files_changed` still come
@@ -134,7 +134,7 @@ This amendment changes **one DDL block, one column**. It does not:
 `EXECUTION_SCHEMA_VERSION` 3 → 4, **three new tables**
 (`dispatch_worktree`, `worktree_provenance`, `worktree_provenance_incident`) —
 unchanged by this amendment. `worktree_provenance` now correctly declares
-**thirteen** columns (was twelve) in its own `CREATE TABLE IF NOT EXISTS`
+**fifteen** columns (was fourteen) in its own `CREATE TABLE IF NOT EXISTS`
 statement; this is a difference *within a table that does not yet exist in any
 shipped schema* (v4 has never been published), not an `ALTER TABLE` against a
 prior version. **Zero columns are added to any ORCA-S1/S2 table.** The v3 → v4

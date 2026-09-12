@@ -5,6 +5,7 @@
 
 import type { AuthoritativeExecutor } from './authoritative-executor'
 import type { SettlementConvergenceReport } from './converge-settlements'
+import type { WorktreeProvenanceConvergenceReport } from './converge-worktree-provenance'
 import type { ExecutionPlane } from './execution-plane'
 import type { ExecutionStore } from './execution-store'
 import {
@@ -12,6 +13,8 @@ import {
   type ShadowSettlementDeps
 } from './reconcile-shadow-execution-state'
 import type { ReservationStore } from './reservation-store'
+import { bindDispatchWorktree, type WorktreeProvenanceDeps } from './worktree-provenance-bind-step'
+import { convergeWorktreeProvenanceSibling } from './worktree-provenance-converge-sibling'
 import {
   makeAiControlRunRef,
   makeCorrelationId,
@@ -21,12 +24,14 @@ import {
 import {
   assertObservationComplete,
   compareOutcomes,
-  type ParityObservation,
-  type RootCauseAdjudication
+  type ParityObservation
 } from '../domain/parity'
 import { assertWorkloadConfined, PathConfinementError } from '../domain/path-confinement'
 import { classifyShadowWorkload, type WorkloadDescriptor } from '../domain/shadow-safety-policy'
 import type { WorkloadSpec } from '../domain/workload-spec'
+import { adjudicate } from './shadow-parity-adjudication'
+
+export { adjudicate } from './shadow-parity-adjudication'
 
 export type ShadowSampleSlot = {
   profile: string
@@ -39,6 +44,12 @@ export type ShadowObservationInput = {
   sliceRef: string
   slots: readonly ShadowSampleSlot[]
   shadowRoot: string
+  /**
+   * ORCA-S3 §10 — confinement boundary for the `'shadow'` worktree when a
+   * durable shadow-worktree root is composed (the `'auth'` worktree always
+   * confines to `shadowRoot`). Defaults to `shadowRoot` when S3 is not composed.
+   */
+  shadowWorktreeRoot?: string
   worktreeDirFor: (kind: 'auth' | 'shadow', correlationId: string) => string
   now: () => string
   newId: (prefix: string) => string
@@ -56,6 +67,8 @@ export type ShadowObservationReport = {
   reconcile: { scanned: number; abandoned: number }
   /** ORCA-S2 — the durable settlement convergence report, when S2 convergence is composed. */
   settlementConvergence?: SettlementConvergenceReport
+  /** ORCA-S3 — the sibling worktree-provenance convergence report, when S3 is composed. */
+  worktreeProvenanceConvergence?: WorktreeProvenanceConvergenceReport
 }
 
 export type ShadowObservationDeps = {
@@ -65,68 +78,13 @@ export type ShadowObservationDeps = {
   reservations: ReservationStore
   /** ORCA-S2 §15 — present when a real durable shadow orchestration.db is composed. */
   settlement?: ShadowSettlementDeps
+  /** ORCA-S3 §7 — present when a durable shadow-worktree root is composed (requires `settlement`). */
+  worktreeProvenance?: WorktreeProvenanceDeps
 }
 
 function sanitize(error: unknown): string {
   const msg = error instanceof Error ? error.message : String(error)
   return msg.length > 500 ? `${msg.slice(0, 500)}…` : msg
-}
-
-/**
- * Structured adjudication (blocker B9). Each divergence dimension is either
- * genuinely `explained` with concrete evidence, or `unresolved` — which makes
- * `assertObservationComplete` throw and fails the acceptance gate.
- */
-export function adjudicate(
-  parity: ReturnType<typeof compareOutcomes>,
-  spec: WorkloadSpec,
-  authoritative: { cancellationBehavior: string },
-  shadow: { cancellationBehavior: string; filesChanged: readonly string[] | null }
-): RootCauseAdjudication[] {
-  return parity.divergences.map((divergence): RootCauseAdjudication => {
-    const observedMismatch = `${divergence.dimension}: authoritative=${divergence.authoritative} shadow=${divergence.shadow}`
-
-    if (divergence.dimension === 'files_changed' && (spec.shadowInputExtras?.length ?? 0) > 0) {
-      return {
-        status: 'explained',
-        dimension: 'files_changed',
-        observedMismatch,
-        classifiedCause: 'shadow_input_worktree_divergence',
-        evidence: [
-          `shadow input worktree carried extra untracked content: ${spec
-            .shadowInputExtras!.map((f) => f.path)
-            .join(', ')}`,
-          `shadow files_changed = [${(shadow.filesChanged ?? []).join(', ')}]`
-        ]
-      }
-    }
-
-    if (
-      divergence.dimension === 'cancellation' &&
-      spec.steps.some((s) => s.op === 'cancel' && s.midFlight) &&
-      authoritative.cancellationBehavior === 'cancelled_clean' &&
-      shadow.cancellationBehavior === 'cancelled_mid_flight'
-    ) {
-      return {
-        status: 'explained',
-        dimension: 'cancellation',
-        observedMismatch,
-        classifiedCause: 'reference_executor_cancellation_granularity_coarse',
-        evidence: [
-          'aiControl-native recording coarsens mid-flight cancellation to clean (amendment 001 §4 row 6)',
-          `authoritative=${authoritative.cancellationBehavior} shadow=${shadow.cancellationBehavior}`
-        ]
-      }
-    }
-
-    return {
-      status: 'unresolved',
-      dimension: divergence.dimension,
-      observedMismatch,
-      classifiedCause: null,
-      evidence: [observedMismatch]
-    }
-  })
 }
 
 export async function runShadowObservation(
@@ -147,6 +105,21 @@ export async function runShadowObservation(
     }
   )
   const reconcile = coordinated.reconcile
+
+  // ORCA-S3 §8 — the sibling two-phase provenance sweep, invoked immediately
+  // AFTER reconcileShadowExecutionState(...) returns (requires `settlement` —
+  // the source of settled-status truth Phase A gates on).
+  let worktreeProvenanceConvergence: WorktreeProvenanceConvergenceReport | undefined
+  if (deps.worktreeProvenance && deps.settlement) {
+    worktreeProvenanceConvergence = convergeWorktreeProvenanceSibling(
+      deps.worktreeProvenance,
+      store,
+      deps.settlement.observations,
+      input.sliceRef,
+      input.now,
+      input.newId
+    )
+  }
 
   const bindings: RunBinding[] = []
   const observations: ParityObservation[] = []
@@ -197,7 +170,7 @@ export async function runShadowObservation(
     // B5 — mechanical confinement of every file effect, before any execution.
     try {
       assertWorkloadConfined(spec, authWorktree, input.shadowRoot)
-      assertWorkloadConfined(spec, shadowWorktree, input.shadowRoot)
+      assertWorkloadConfined(spec, shadowWorktree, input.shadowWorktreeRoot ?? input.shadowRoot)
     } catch (error) {
       if (error instanceof PathConfinementError) {
         store.recordExclusion({
@@ -255,7 +228,25 @@ export async function runShadowObservation(
         candidateHead: null,
         boundAt: input.now()
       }
-      store.recordBinding(binding) // I3
+      // ORCA-S3 §7.2, §7.6 — pinned bind-time write ordering (bindDispatchWorktree).
+      if (deps.worktreeProvenance) {
+        bindDispatchWorktree(
+          deps.worktreeProvenance,
+          store,
+          binding,
+          {
+            orcaDispatchId: String(opened.orcaDispatchRef),
+            orcaRunId: String(opened.orcaRunRef),
+            correlationId: String(correlationId)
+          },
+          shadowWorktree,
+          input.sliceRef,
+          input.now,
+          input.newId
+        )
+      } else {
+        store.recordBinding(binding) // I3
+      }
       reservations.advance(correlationId, 'bound', { now: input.now() })
       bindings.push(binding)
 
@@ -332,6 +323,7 @@ export async function runShadowObservation(
     divergences,
     abandoned,
     reconcile: { scanned: reconcile.scanned, abandoned: reconcile.abandoned.length },
-    settlementConvergence: coordinated.convergence ?? undefined
+    settlementConvergence: coordinated.convergence ?? undefined,
+    worktreeProvenanceConvergence
   }
 }

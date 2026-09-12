@@ -1,5 +1,7 @@
-import { existsSync } from 'node:fs'
+import { existsSync, mkdirSync } from 'node:fs'
+import { resolve } from 'node:path'
 import type SyncDatabase from '../../sqlite/sync-database'
+import { isInside } from '../domain/path-confinement'
 
 // Execution bounded context — infrastructure. §10 (B4 — retention-by-storage-
 // boundary). Mirrors `durable-shadow-orchestration-path.ts` (S2 §17): resolve +
@@ -81,4 +83,19 @@ export function resolveDurableShadowWorktreeRoot(
   }
 
   return persisted
+}
+
+/**
+ * A fresh worktree dir under the RESOLVED durable shadow-worktree root.
+ * Mirrors `DisposableShadowRoot.worktreeDir` (§10), but this tree is never
+ * touched by `DisposableShadowRoot.cleanup()` — it is the durable, S3-owned
+ * home for shadow worktrees (the `'auth'` worktrees stay disposable).
+ */
+export function durableShadowWorktreeDir(durableRoot: string, name: string): string {
+  const target = resolve(durableRoot, 'worktrees', name.replace(/[^a-zA-Z0-9._-]/g, '_'))
+  if (!isInside(target, durableRoot)) {
+    throw new Error(`worktree dir escapes the durable shadow-worktree root: ${target}`)
+  }
+  mkdirSync(target, { recursive: true })
+  return target
 }

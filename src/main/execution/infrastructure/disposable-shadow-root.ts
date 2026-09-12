@@ -3,9 +3,11 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { isInside } from '../domain/path-confinement'
 
-// Execution bounded context — infrastructure. One disposable root that owns
-// every shadow worktree + the dedicated shadow orchestration DB for a slice run
-// (amendment 001 §6, §9). Nothing shadow ever writes outside this root.
+// Execution bounded context — infrastructure. One disposable root for a slice
+// run (amendment 001 §6, §9). ORCA-S2 §17 removed the durable orchestration.db
+// from this root's ownership; ORCA-S3 §10 removes the 'shadow' worktree the
+// same way — this root now parents only the disposable 'auth' worktree.
+// `cleanup()` (rmSync of this root) must never reach either durable resource.
 
 export class DisposableShadowRoot {
   readonly root: string

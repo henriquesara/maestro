@@ -45,6 +45,9 @@ describe('SqliteWorktreeProvenanceIncidentStore (§7.3)', () => {
     const dir = mkdtempSync(join(tmpdir(), 'orca-s3-wpi-'))
     dirs.push(dir)
     const db = new SyncDatabase(join(dir, 'exec.db'))
+    // No parent run_reservation row is seeded — matches the established S2
+    // harness pattern (settlement-test-harness.ts) for standalone store tests.
+    db.pragma('foreign_keys = OFF')
     migrateExecutionStore(db)
     return { db, store: new SqliteWorktreeProvenanceIncidentStore(db) }
   }

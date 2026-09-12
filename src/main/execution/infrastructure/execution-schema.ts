@@ -133,14 +133,14 @@ CREATE INDEX IF NOT EXISTS settlement_incident_by_slice ON settlement_incident(s
  * transaction as run_binding. Kept as its own constant so the S3 sqlite store
  * can defensively re-ensure it exists (never touched by the projection
  * rebuild, unlike SETTLEMENT_PROJECTION_SQL / WORKTREE_PROVENANCE_PROJECTION_SQL).
- * No REFERENCES run_reservation — unit-level store tests exercise this table
- * standalone, without a parent reservation row; the composition-boundary
- * always inserts it alongside run_binding within one already-referenced tree.
+ * REFERENCES run_reservation(correlation_id) per SPEC §7 — standalone store
+ * tests disable enforcement with `PRAGMA foreign_keys = OFF`, same as
+ * settlement_observation / settlement_incident's own tests.
  */
 export const DISPATCH_WORKTREE_SQL = `
 CREATE TABLE IF NOT EXISTS dispatch_worktree (
   orca_dispatch_id  TEXT PRIMARY KEY,
-  correlation_id    TEXT NOT NULL,
+  correlation_id    TEXT NOT NULL REFERENCES run_reservation(correlation_id),
   orca_run_id       TEXT NOT NULL,
   worktree_nonce    TEXT NOT NULL,
   worktree_path     TEXT NOT NULL,
@@ -158,7 +158,7 @@ CREATE INDEX IF NOT EXISTS dispatch_worktree_by_correlation ON dispatch_worktree
  */
 export const WORKTREE_PROVENANCE_PROJECTION_SQL = `
 CREATE TABLE IF NOT EXISTS worktree_provenance (
-  correlation_id      TEXT PRIMARY KEY,
+  correlation_id      TEXT PRIMARY KEY REFERENCES run_reservation(correlation_id),
   orca_dispatch_id    TEXT NOT NULL,
   orca_run_id         TEXT NOT NULL,
   slice_ref           TEXT NOT NULL,
@@ -178,7 +178,7 @@ CREATE INDEX IF NOT EXISTS worktree_provenance_by_slice ON worktree_provenance(s
 
 CREATE TABLE IF NOT EXISTS worktree_provenance_incident (
   id               TEXT PRIMARY KEY,
-  correlation_id   TEXT NOT NULL,
+  correlation_id   TEXT NOT NULL REFERENCES run_reservation(correlation_id),
   orca_dispatch_id TEXT,
   slice_ref        TEXT NOT NULL,
   kind             TEXT NOT NULL,

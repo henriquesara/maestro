@@ -36,6 +36,9 @@ describe('resolveDurableShadowWorktreeRoot (§10)', () => {
   function openExecDb(): { db: SyncDatabase; dir: string } {
     const dir = tmp()
     const db = new SyncDatabase(join(dir, 'exec.db'))
+    // No parent run_reservation row is seeded — matches the established S2
+    // harness pattern (settlement-test-harness.ts) for standalone store tests.
+    db.pragma('foreign_keys = OFF')
     migrateExecutionStore(db)
     return { db, dir }
   }

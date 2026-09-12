@@ -44,9 +44,20 @@ function git(args, cwd) {
   execFileSync('git', args, { cwd, stdio: 'ignore' })
 }
 
+function gitCapture(args, cwd) {
+  return execFileSync('git', args, { cwd }).toString('utf8').trim()
+}
+
 function hangForever(markerPath) {
   writeFileSync(markerPath, 'READY')
-  setInterval(() => {}, 1000)
+  // Block the single JS thread synchronously, forever — `setInterval` alone
+  // would arm a keep-alive timer but let execution fall through to the next
+  // statement, defeating every `haltAt` checkpoint below. The parent SIGKILLs
+  // this process while it sits in this loop.
+  const gate = new Int32Array(new SharedArrayBuffer(4))
+  for (;;) {
+    Atomics.wait(gate, 0, 0, 1000)
+  }
 }
 
 // --- step 1: create the durable shadow worktree ---
@@ -59,6 +70,7 @@ git(['config', 'commit.gpgsign', 'false'], worktreePath)
 writeFileSync(join(worktreePath, 'seed.ts'), 'seed\n')
 git(['add', '-A'], worktreePath)
 git(['commit', '-q', '-m', 'base'], worktreePath)
+const baseCommit = gitCapture(['rev-parse', 'HEAD'], worktreePath)
 
 if (haltAt === 'A') {
   hangForever(readyMarker)
@@ -96,9 +108,9 @@ exec
   .prepare(
     `INSERT INTO run_binding
        (orca_dispatch_id, correlation_id, governance_agent_run_id, aicontrol_run_id, orca_run_id, org_task_id, slice_ref, base_commit, candidate_head, bound_at)
-     VALUES (?, ?, ?, NULL, ?, ?, ?, 'base', NULL, ?)`
+     VALUES (?, ?, ?, NULL, ?, ?, ?, ?, NULL, ?)`
   )
-  .run(dispatchId, correlationId, `gar_${correlationId}`, runId, taskId, sliceRef, nowIso)
+  .run(dispatchId, correlationId, `gar_${correlationId}`, runId, taskId, sliceRef, baseCommit, nowIso)
 
 if (haltAt === 'C') {
   // Still inside the OPEN, uncommitted transaction — SIGKILL here must roll

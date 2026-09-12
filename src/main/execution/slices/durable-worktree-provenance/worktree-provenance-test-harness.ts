@@ -121,7 +121,10 @@ export function fixtureSettlementObservation(over: Record<string, unknown> = {})
 /** Opens every store S3 needs against one real (or ':memory:') Execution SQLite file. */
 export function openExecStores(dbPath: (string & {}) | ':memory:' = ':memory:') {
   const db = new SyncDatabase(dbPath)
-  db.pragma('foreign_keys = ON')
+  // Mirrors settlement-test-harness.ts (S2): fixtures write run_binding /
+  // dispatch_worktree / worktree_provenance directly without seeding a
+  // matching run_reservation row first, so FK enforcement stays off here.
+  db.pragma('foreign_keys = OFF')
   migrateExecutionStore(db)
   return {
     db,

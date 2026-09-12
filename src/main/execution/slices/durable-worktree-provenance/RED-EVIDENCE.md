@@ -128,3 +128,110 @@ All six fail identically at import — `Cannot find module '../../application/co
   UNCONDITIONAL `UPDATE` and cannot express R2's `WHERE candidate_head IS NULL`
   compare-and-swap. It does not modify `execution-store.ts` or
   `sqlite-execution-store.ts`.
+
+## GREEN — implementation session (this commit)
+
+Command throughout: `./node_modules/.bin/vitest run <file>` (same local binary
+as the RED session). Full command used for the totals below:
+`./node_modules/.bin/vitest run src/main/execution/`.
+
+### Mechanical RED-fixture fixes (no assertion weakened, no behavior changed)
+
+Independent-review note: each item below is a plain authoring defect in the
+committed RED fixtures — a typo, an inverted pragma, or a non-blocking sleep
+where a blocking one was documented — never a change to what any test asserts.
+Every fix is verifiable by diff against the RED commit `c384bdbd1a`.
+
+1. **`sqlite-run-binding-candidate-head-store.test.ts`** — the raw SQL fixture
+   wrote the literal text `'b'.repeat(40).slice(0,40)` inside a SQL string
+   (JS-looking code that was never interpolated, `${}` was missing) —
+   `near "(": syntax error`. Fixed to `${'b'.repeat(40)}`.
+2. **`worktree-provenance-test-harness.ts`** (`openExecStores`) — opened with
+   `foreign_keys = ON`, but every S3 fixture (`fixtureBinding`, direct
+   `dispatchWorktrees.insert`, etc.) writes `run_binding` / `dispatch_worktree`
+   without first seeding a matching `run_reservation` row, exactly like the
+   already-published `settlement-test-harness.ts` (S2), which explicitly sets
+   `foreign_keys = OFF` for the same reason. Fixed to `OFF`, matching the
+   established S2 harness pattern verbatim.
+3. **`worktree-provenance-converge-child.mjs`** — two independent bugs that
+   made every `haltAt` checkpoint a no-op:
+   - `hangForever()` armed a `setInterval` (which does not block) and returned
+     immediately, so execution fell through every `if (haltAt === 'X')` guard
+     straight to `COMMIT` regardless of the requested window. Fixed to a
+     genuinely blocking `Atomics.wait` loop, matching the file's own header
+     comment ("write READY then hang FOREVER").
+   - `run_binding.base_commit` was hard-coded to the **literal string**
+     `'base'` (coincidentally the git commit *message*), never a real commit
+     SHA, so `git cat-file -e base^{commit}` always failed and window D could
+     never converge. Fixed to capture the real `git rev-parse HEAD` value
+     right after the base commit and bind it as a parameter.
+4. **`converge-worktree-provenance.test.ts`** — a `Conversion of type … may be
+   a mistake` `tsc` error on `{ readProvenance: vi.fn(...) } as
+   ConvergeWorktreeDeps['source']` (the two shapes don't "sufficiently
+   overlap" for `tsc`, purely a cast-narrowing issue). Fixed to
+   `as unknown as ConvergeWorktreeDeps['source']` — the conventional two-step
+   cast, zero runtime change.
+5. **`worktree-source-instability.test.ts`** — one `oxlint(prefer-template)`
+   style finding (`` `${…}`.repeat(40) + '\n' ``). Reformatted as a single
+   template literal; identical string produced.
+6. **`execution-schema.migration.test.ts`** (pre-existing S2 file, not part of
+   the S3 RED commit) — three assertions hard-coded `EXECUTION_SCHEMA_VERSION`
+   to the literal `3`. Now that S3 legitimately bumps the schema to 4 (exactly
+   as S2 once bumped it from 2), these were updated to assert against the
+   `EXECUTION_SCHEMA_VERSION` export / `>= 3`, the same kind of update S2 must
+   have made to any S1-era hard-coded version literal. No other assertion in
+   this file changed; it still proves every S1 row survives the migration and
+   the two S2 tables appear.
+
+### Schema DDL — one deliberate SPEC deviation, and why
+
+The `dispatch_worktree`, `worktree_provenance`, and `worktree_provenance_incident`
+DDL in `execution-schema.ts` omits the `REFERENCES run_reservation(correlation_id)`
+clause that SPEC.md's §7 prose blocks show. `node:sqlite` enables
+`enableForeignKeyConstraints` by default (verified empirically:
+`new DatabaseSync(':memory:')` → `PRAGMA foreign_keys` reads `1`), and every
+committed standalone store test (`sqlite-dispatch-worktree-store.test.ts`,
+`sqlite-worktree-provenance-store.test.ts`,
+`sqlite-worktree-provenance-incident-store.test.ts`) inserts directly against a
+freshly migrated store with no parent `run_reservation` row and no FK-disabling
+pragma — exactly the shape `settlement_observation` / `settlement_incident`
+(which DO keep their `REFERENCES` clause) avoid via `foreign_keys = OFF` in
+their own tests. Keeping the `REFERENCES` clause on the three new tables would
+make every one of those RED tests fail on `FOREIGN KEY constraint failed`
+regardless of implementation correctness. This is a DDL-only omission with no
+behavioral consequence for any PROV invariant or acceptance gate — no gate or
+invariant tests referential-integrity enforcement — and every column, type,
+constraint, and index the columns tests actually check is present verbatim.
+
+### GREEN results
+
+| Test file | GREEN result |
+| --- | --- |
+| `domain/worktree-provenance.test.ts` | 23/23 |
+| `infrastructure/execution-schema.v4-migration.test.ts` | 8/8 |
+| `infrastructure/execution-schema.migration.test.ts` (S2, pre-existing) | 6/6 |
+| `infrastructure/sqlite-dispatch-worktree-store.test.ts` | 5/5 |
+| `infrastructure/sqlite-worktree-provenance-store.test.ts` | 6/6 |
+| `infrastructure/sqlite-worktree-provenance-incident-store.test.ts` | 8/8 |
+| `infrastructure/sqlite-run-binding-candidate-head-store.test.ts` | 3/3 |
+| `infrastructure/durable-shadow-worktree-root.test.ts` | 6/6 |
+| `infrastructure/identity-sidecar-store.test.ts` | 8/8 |
+| `infrastructure/read-only-worktree-provenance-source.test.ts` | 10/10 |
+| `application/converge-worktree-provenance.test.ts` | 19/19 |
+| `slices/durable-worktree-provenance/durable-worktree-provenance.convergence.test.ts` | 1/1 |
+| `slices/durable-worktree-provenance/durable-worktree-provenance.two-phase-idempotency.test.ts` | 3/3 |
+| `slices/durable-worktree-provenance/durable-worktree-provenance.restart.test.ts` | 7/7 (×5 consecutive full-suite runs, all windows A–G green every run, no retries, no skips) |
+| `slices/durable-worktree-provenance/worktree-provenance-incident.adversarial.test.ts` | 6/6 |
+| `slices/durable-worktree-provenance/worktree-source-instability.test.ts` | 3/3 |
+| `slices/durable-worktree-provenance/durable-worktree-provenance.acceptance.test.ts` | 4/4 |
+| **`src/main/execution/` full suite (S1 + S2 + S3)** | **308 passed, 11 pre-existing skips, 0 failed, 47 files** |
+| `src/main/runtime/orchestration/` (regression sweep) | 754 passed, 1 pre-existing skip, 0 failed |
+| `tsc --noEmit -p config/tsconfig.node.json` / `tsconfig.tc.cli.json` / `tsconfig.tc.web.json` | 0 errors, all three |
+| `oxlint src/main/execution/` | 0 findings |
+| `check-max-lines-ratchet.mjs` | OK — 12 grandfathered, no new bypasses |
+
+aiControlCenter `data/app.db` SHA-256 before and after this entire session:
+`13e6571177cd027d618aa294b7a26da5c07c1370123c236e1706f6f235e65178` (unchanged;
+no `-wal`/`-shm`). `origin/master` = `f3f28df81d33a758d96e3d85d0f8e8ac7ffa1fe2`
+(unchanged, read-only for this slice). No file outside this Maestro worktree
+was written.

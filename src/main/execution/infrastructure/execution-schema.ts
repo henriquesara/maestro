@@ -9,8 +9,12 @@ import type SyncDatabase from '../../sqlite/sync-database'
 // settlement_incident). No column added to any ORCA-S1 table. The versioned
 // upgrade ladder (version compare + explicit bump) is defined now even though v3
 // needs no ALTER, so a later v4 has a real ladder to extend.
+//
+// ORCA-S3 (§7, SPEC-AMENDMENT-001 §6): schema v3 → v4 — THREE NEW TABLES
+// (dispatch_worktree, worktree_provenance, worktree_provenance_incident) + their
+// indexes. Zero column added to any ORCA-S1/S2 table.
 
-export const EXECUTION_SCHEMA_VERSION = 3
+export const EXECUTION_SCHEMA_VERSION = 4
 
 const CREATE_SQL = `
 CREATE TABLE IF NOT EXISTS run_reservation (
@@ -123,6 +127,74 @@ CREATE UNIQUE INDEX IF NOT EXISTS settlement_incident_unique
 CREATE INDEX IF NOT EXISTS settlement_incident_by_slice ON settlement_incident(slice_ref);
 `
 
+/**
+ * ORCA-S3 §7.2 — dispatch_worktree is durable SOURCE state (never rebuilt,
+ * §7.5, PROV-11): the row is written once, at bind time, in the same
+ * transaction as run_binding. Kept as its own constant so the S3 sqlite store
+ * can defensively re-ensure it exists (never touched by the projection
+ * rebuild, unlike SETTLEMENT_PROJECTION_SQL / WORKTREE_PROVENANCE_PROJECTION_SQL).
+ * No REFERENCES run_reservation — unit-level store tests exercise this table
+ * standalone, without a parent reservation row; the composition-boundary
+ * always inserts it alongside run_binding within one already-referenced tree.
+ */
+export const DISPATCH_WORKTREE_SQL = `
+CREATE TABLE IF NOT EXISTS dispatch_worktree (
+  orca_dispatch_id  TEXT PRIMARY KEY,
+  correlation_id    TEXT NOT NULL,
+  orca_run_id       TEXT NOT NULL,
+  worktree_nonce    TEXT NOT NULL,
+  worktree_path     TEXT NOT NULL,
+  root_ref          TEXT NOT NULL,
+  opened_at         TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS dispatch_worktree_by_correlation ON dispatch_worktree(correlation_id);
+`
+
+/**
+ * ORCA-S3 §7.1 / §7.3, SPEC-AMENDMENT-001 §3 — the two S3-owned PROJECTION
+ * tables (worktree_provenance, worktree_provenance_incident). Kept as one
+ * source of truth so the provenance-projection rebuild (§7.5) recreates
+ * EXACTLY the same shape it drops.
+ */
+export const WORKTREE_PROVENANCE_PROJECTION_SQL = `
+CREATE TABLE IF NOT EXISTS worktree_provenance (
+  correlation_id      TEXT PRIMARY KEY,
+  orca_dispatch_id    TEXT NOT NULL,
+  orca_run_id         TEXT NOT NULL,
+  slice_ref           TEXT NOT NULL,
+  status              TEXT NOT NULL DEFAULT 'recorded',
+  base_commit         TEXT NOT NULL,
+  candidate_head      TEXT NOT NULL,
+  files_changed_json  TEXT NOT NULL,
+  provenance_source   TEXT NOT NULL,
+  worktree_path_ref   TEXT NOT NULL,
+  provenance_digest   TEXT NOT NULL,
+  provenance_json     TEXT NOT NULL,
+  first_seen_at       TEXT NOT NULL,
+  observed_at         TEXT NOT NULL,
+  conflicted_at       TEXT
+);
+CREATE INDEX IF NOT EXISTS worktree_provenance_by_slice ON worktree_provenance(slice_ref);
+
+CREATE TABLE IF NOT EXISTS worktree_provenance_incident (
+  id               TEXT PRIMARY KEY,
+  correlation_id   TEXT NOT NULL,
+  orca_dispatch_id TEXT,
+  slice_ref        TEXT NOT NULL,
+  kind             TEXT NOT NULL,
+  evidence_digest  TEXT NOT NULL,
+  detail_json      TEXT NOT NULL,
+  blocked          INTEGER NOT NULL DEFAULT 1,
+  resolved_at      TEXT,
+  resolution_note  TEXT,
+  raised_at        TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS worktree_provenance_incident_unique
+  ON worktree_provenance_incident(correlation_id, kind, evidence_digest);
+CREATE INDEX IF NOT EXISTS worktree_provenance_incident_by_slice
+  ON worktree_provenance_incident(slice_ref);
+`
+
 function readSchemaVersion(db: SyncDatabase): number | undefined {
   const row = db.prepare("SELECT value FROM execution_meta WHERE key = 'schema_version'").get() as
     | { value: string }
@@ -131,9 +203,11 @@ function readSchemaVersion(db: SyncDatabase): number | undefined {
 }
 
 /**
- * §11.1 — versioned upgrade. Idempotent and transactional. An existing v2 store
- * opens, keeps every S1 row untouched, and gains the two S2 tables; a v2 store
- * upgraded to v3 and a freshly created v3 store are structurally identical.
+ * §11.1 / ORCA-S3 §7 — versioned upgrade. Idempotent and transactional. An
+ * existing store opens, keeps every prior row untouched, and gains any table
+ * introduced by a newer schema version; a store upgraded to the current
+ * version and a freshly created store at that version are structurally
+ * identical.
  */
 export function migrateExecutionStore(db: SyncDatabase): void {
   const alreadyInTransaction = db.isTransaction
@@ -143,14 +217,17 @@ export function migrateExecutionStore(db: SyncDatabase): void {
   try {
     db.exec(CREATE_SQL)
     db.exec(SETTLEMENT_PROJECTION_SQL)
+    db.exec(DISPATCH_WORKTREE_SQL)
+    db.exec(WORKTREE_PROVENANCE_PROJECTION_SQL)
     const current = readSchemaVersion(db)
     if (current === undefined) {
       db.prepare("INSERT INTO execution_meta (key, value) VALUES ('schema_version', ?)").run(
         String(EXECUTION_SCHEMA_VERSION)
       )
     } else if (current < EXECUTION_SCHEMA_VERSION) {
-      // The v3 step is only "ensure the two S2 tables + indexes exist" — done by CREATE above,
-      // because S2 adds no column and therefore needs no ALTER TABLE.
+      // Both the v2->v3 and v3->v4 steps are only "ensure the new tables +
+      // indexes exist" — done by the CREATE statements above, because neither
+      // S2 nor S3 adds a column and therefore neither needs an ALTER TABLE.
       db.prepare("UPDATE execution_meta SET value = ? WHERE key = 'schema_version'").run(
         String(EXECUTION_SCHEMA_VERSION)
       )

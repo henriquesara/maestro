@@ -101,11 +101,11 @@ describe('migrateExecutionStore — v2 → v3 versioned upgrade (§11.1)', () =>
     return d
   }
 
-  it('EXECUTION_SCHEMA_VERSION is 3', () => {
-    expect(EXECUTION_SCHEMA_VERSION).toBe(3)
+  it('EXECUTION_SCHEMA_VERSION is at least 3 (ORCA-S3 bumps it further to 4)', () => {
+    expect(EXECUTION_SCHEMA_VERSION).toBeGreaterThanOrEqual(3)
   })
 
-  it('opens an existing v2 store, preserves every S1 row, adds only the two S2 tables, bumps to 3', () => {
+  it('opens an existing v2 store, preserves every S1 row, adds the two S2 tables, bumps to the current version', () => {
     const path = join(tmp(), 'exec.db')
     const v2 = new SyncDatabase(path)
     v2.exec(V2_CREATE_SQL)
@@ -143,11 +143,11 @@ describe('migrateExecutionStore — v2 → v3 versioned upgrade (§11.1)', () =>
     expect(tableColumns(db, 'settlement_incident').length).toBeGreaterThan(0)
     expect(
       db.prepare("SELECT value FROM execution_meta WHERE key = 'schema_version'").get()
-    ).toEqual({ value: '3' })
+    ).toEqual({ value: String(EXECUTION_SCHEMA_VERSION) })
     db.close()
   })
 
-  it('a v2-upgraded-to-v3 store and a freshly created v3 store are structurally identical', () => {
+  it('a v2-upgraded store and a freshly created store at the current version are structurally identical', () => {
     const upgradedPath = join(tmp(), 'upgraded.db')
     const u = new SyncDatabase(upgradedPath)
     u.exec(V2_CREATE_SQL)
@@ -167,7 +167,7 @@ describe('migrateExecutionStore — v2 → v3 versioned upgrade (§11.1)', () =>
     expect(upgradedFp).toBe(freshFp)
   })
 
-  it('is idempotent — a second migrate is a no-op and keeps schema_version 3', () => {
+  it('is idempotent — a second migrate is a no-op and keeps the current schema_version', () => {
     const path = join(tmp(), 'idem.db')
     const db = new SyncDatabase(path)
     migrateExecutionStore(db)
@@ -177,7 +177,7 @@ describe('migrateExecutionStore — v2 → v3 versioned upgrade (§11.1)', () =>
     expect(schemaFingerprint(db)).toBe(fp1)
     expect(
       db.prepare("SELECT value FROM execution_meta WHERE key = 'schema_version'").get()
-    ).toEqual({ value: '3' })
+    ).toEqual({ value: String(EXECUTION_SCHEMA_VERSION) })
     db.close()
   })
 

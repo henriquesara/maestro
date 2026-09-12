@@ -41,7 +41,9 @@ function binding(over: Partial<RunBinding> = {}): RunBinding {
   }
 }
 
-function settlement(status: 'observed' | 'observed_conflicted' = 'observed'): SettlementObservationRecord {
+function settlement(
+  status: 'observed' | 'observed_conflicted' = 'observed'
+): SettlementObservationRecord {
   return {
     correlationId: CID,
     orcaDispatchId: DISPATCH,
@@ -150,7 +152,7 @@ function makeFakes(opts: {
     } as ConvergeWorktreeDeps['runBindingCandidateHead'],
     source: {
       readProvenance: vi.fn(() => opts.read ?? resolvedRead())
-    } as ConvergeWorktreeDeps['source'],
+    } as unknown as ConvergeWorktreeDeps['source'],
     txn: {
       withImmediateTransaction: <T>(fn: () => T): T => {
         if (opts.busy) {
@@ -257,7 +259,10 @@ describe('convergeWorktreeProvenance — Phase A (record)', () => {
     expect(provenanceRows.size).toBe(0)
     expect(incidentsInserted).toHaveLength(0)
     expect(report.retryable).toContainEqual(
-      expect.objectContaining({ correlationId: CID, reason: 'WORKTREE_SOURCE_OPERATIONAL_RETRYABLE' })
+      expect.objectContaining({
+        correlationId: CID,
+        reason: 'WORKTREE_SOURCE_OPERATIONAL_RETRYABLE'
+      })
     )
   })
 

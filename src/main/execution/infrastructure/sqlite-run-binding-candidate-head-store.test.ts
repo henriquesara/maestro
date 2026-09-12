@@ -37,13 +37,15 @@ describe('SqliteRunBindingCandidateHeadStore (§7.4 R2)', () => {
     ).run()
     db.prepare(
       `INSERT INTO run_binding (orca_dispatch_id, correlation_id, governance_agent_run_id, orca_run_id, org_task_id, slice_ref, base_commit, candidate_head, bound_at)
-       VALUES ('ctx_1', 'corr_1', 'gar_1', 'run_1', 'task_1', 'ORCA-S3', 'b'.repeat(40).slice(0,40), NULL, 't')`
+       VALUES ('ctx_1', 'corr_1', 'gar_1', 'run_1', 'task_1', 'ORCA-S3', '${'b'.repeat(40)}', NULL, 't')`
     ).run()
     return { db, store: new SqliteRunBindingCandidateHeadStore(db) }
   }
   function currentCandidateHead(db: SyncDatabase): string | null {
     return (
-      db.prepare('SELECT candidate_head FROM run_binding WHERE orca_dispatch_id = ?').get('ctx_1') as {
+      db
+        .prepare('SELECT candidate_head FROM run_binding WHERE orca_dispatch_id = ?')
+        .get('ctx_1') as {
         candidate_head: string | null
       }
     ).candidate_head

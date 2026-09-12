@@ -78,7 +78,10 @@ describe('worktree-source-instability — retryable taxonomy (gate 17)', () => {
     expect(stores.provenance.getByCorrelation(CID)).toBeUndefined()
     expect(stores.incidents.listBySlice(SLICE)).toHaveLength(0)
     expect(report.retryable).toContainEqual(
-      expect.objectContaining({ correlationId: CID, reason: 'WORKTREE_SOURCE_OPERATIONAL_RETRYABLE' })
+      expect.objectContaining({
+        correlationId: CID,
+        reason: 'WORKTREE_SOURCE_OPERATIONAL_RETRYABLE'
+      })
     )
   })
 
@@ -92,7 +95,7 @@ describe('worktree-source-instability — retryable taxonomy (gate 17)', () => {
         if (args[0] === 'rev-parse' && args[1] === 'HEAD') {
           return {
             code: 0,
-            stdout: `${call % 2 === 0 ? 'a' : 'b'}`.repeat(40) + '\n',
+            stdout: `${`${call % 2 === 0 ? 'a' : 'b'}`.repeat(40)}\n`,
             stderr: '',
             timedOut: false
           }

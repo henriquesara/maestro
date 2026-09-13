@@ -281,8 +281,9 @@ process or real worktree touched**; authority stays `AICONTROL_NATIVE`.
 | Term | Meaning in this slice |
 | --- | --- |
 | Shadow lifecycle process | A synthetic, Execution-spawned Node child process — **not** a workload executor, **not** proof of production process-handle acquisition — whose sole purpose is to give S4 a real OS process/process-group to durably bind, observe, and tear down. Spawned via `spawnProcess` (`src/shared/child-process/`), `detached: true` (own POSIX process group). |
-| Process identity | `{ correlationId, orcaRunId, orcaDispatchId, processNonce }` — Execution-minted at spawn time, written to a process identity sidecar **before** spawning, persisted verbatim on `dispatch_process_binding`. `pid` is corroborating only — **never** identity by itself (pids recycle). **Neither `pid` nor the sidecar's presence, alone or together, distinguishes the original spawned process from an unrelated process that later reuses the same `pid`** — restart-recovered corroboration additionally requires the OS-observable process-instance discriminator below (§9.1). |
-| OS-observable process-instance discriminator | `osStartMarker` (+ `osStartMarkerSource`) — an opaque, host-supplied value that identifies *this specific OS process instance*, not merely its `pid`, captured once at spawn (§9.2) and re-read from the OS (never from the sidecar or the DB) at restart-recovery time for exact comparison. Sourced from the **same** primitives this repository already uses elsewhere for PID-reuse-safe identity: Windows native process creation-time (`isWindowsProcessStartTimeAvailable` / `creationTimeMs`, `src/main/windows/windows-process-table.ts`); POSIX `/proc/<pid>/stat`'s own `starttime` field on Linux (stable — ticks since boot, unlike the elapsed-seconds `ps etimes=` column, which is **not** a valid discriminator because it changes every read); `ps -o lstart=` absolute wall-clock start time on macOS (`src/shared/process-table-snapshot.ts`). **Never** identity by itself either — it corroborates the sidecar/nonce match, and both must agree. |
+| Process identity | `{ correlationId, orcaRunId, orcaDispatchId, processNonce }` — Execution-minted at spawn time, written to a process identity sidecar **before** spawning, persisted verbatim on `dispatch_process_binding`. `pid` is corroborating only — **never** identity by itself (pids recycle). **Neither `pid` nor the sidecar's presence, alone or together, distinguishes the original spawned process from an unrelated process that later reuses the same `pid`** — restart-recovered corroboration additionally requires the OS-observable process-instance discriminator below (§9.1). On macOS specifically, `processNonce` is **additionally** embedded, verbatim, in a stable argv token on the spawned process itself (§9.2 step 4), so it can be read back from the live OS process — never trusted from the sidecar or the DB — as one component of the compound identity proof macOS requires (§9.1.3). |
+| OS-observable process-instance discriminator | `osStartMarker` (+ `osStartMarkerSource`) — an opaque, host-supplied value that identifies *this specific OS process instance*, not merely its `pid`, captured once at spawn (§9.2) and re-read from the OS (never from the sidecar or the DB) at restart-recovery time for exact comparison. Sourced from the **same** primitives this repository already uses elsewhere for PID-reuse-safe identity: Windows native process creation-time (`isWindowsProcessStartTimeAvailable` / `creationTimeMs`, `src/main/windows/windows-process-table.ts`); POSIX `/proc/<pid>/stat`'s own `starttime` field on Linux (stable — ticks since boot, unlike the elapsed-seconds `ps etimes=` column, which is **not** a valid discriminator because it changes every read); `ps -o lstart=` absolute wall-clock start time on macOS (`src/shared/process-table-snapshot.ts`, and this repository's own existing `getPsProcessIdentity` / `daemon-process-identity-query.ts` precedent). On Windows and Linux, this value alone, exactly matched, is **sufficient** corroboration alongside the sidecar/nonce match (§9.1.2) — both sources carry sub-second resolution and neither rule is weakened or redesigned by this correction. **On macOS it is not sufficient by itself**: BSD `ps -o lstart=` is a fixed-width, whole-second-only timestamp, so two distinct process instances started within the same wall-clock second are indistinguishable by `os_start_marker` alone — which defeats exactly the PID-reuse protection this discriminator exists to provide. macOS therefore requires the additional compound proof of §9.1.3; bare `pid` + `lstart` must **never** authorize a restart-recovered signal on macOS. Never identity by itself on any platform: on Windows/Linux it corroborates the sidecar/nonce match and both must agree; on macOS it is one component of the §9.1.3 compound proof and none of that proof's components may be skipped. |
+| macOS argv-nonce corroboration | The §9.1.3 addition that makes macOS's compound identity proof sound despite `posix_ps_lstart`'s whole-second resolution. The shadow lifecycle process's `processNonce` is embedded, verbatim, in a stable argv token at spawn time (§9.2 step 4). Restart-recovered corroboration on macOS additionally re-reads the live process's command/argv — the **same** `ps -p <pid> -o lstart= -o command=` call already used for the OS-marker, reusing this repository's own existing `getPsProcessIdentity` precedent (`src/main/daemon/daemon-process-identity-query.ts`) rather than a new mechanism — and requires that argv to be readable, to match the expected synthetic shadow-lifecycle-process shape, and to contain that exact `processNonce` token. A same-second `lstart` collision with an unrelated process, or with another S4 synthetic process carrying a *different* `processNonce`, fails this check → `identity_unverifiable` → **no signal**. |
 | Termination fact | `dispatch_termination` — the durable, one-time capture of an **ephemeral, non-replayable** OS event (a process's exit). Unlike ORCA-S3's Git-derived facts, once the process is reaped there is **no durable source left to re-derive this from** — see §8.0. |
 | Worktree finalization | The governed act of reaping (deleting) a durable ORCA-S3 shadow worktree once it is provably no longer needed by any future provenance read. Intent is recorded **before** the filesystem act; result **after** it (§10). |
 | Dispatch lifecycle closure | `dispatch_lifecycle_closure` — the Maestro-native, Execution-owned, advisory analogue of "execution-attempt closure." **Not** aiControlCenter's `execution_attempts` table (that table does not exist in this repository — `GAP-ANALYSIS-ORCA-DELEGATED.md` §3). A write-once reference aggregate over already-durable facts; it **copies, never re-decides**, what those facts already say. |
@@ -581,6 +582,15 @@ CREATE INDEX IF NOT EXISTS dispatch_process_binding_by_correlation ON dispatch_p
   `identity_unverifiable`**, because there is no durable baseline to compare
   against (§9.1, §12 window L13). This never affects the same-process-instance
   live-handle path (§9.1.1), which does not depend on the OS marker at all.
+- **`process_nonce` carries an additional load on macOS**: when
+  `os_start_marker_source = 'posix_ps_lstart'`, this same column value is also
+  the exact token the adapter expects to find, verbatim, in the live process's
+  argv at restart-recovery time (§9.1.3) — because `os_start_marker` alone is
+  whole-second-resolution and cannot, by itself, defeat a same-second PID
+  reuse on macOS. No new column is added for this (`EXECUTION_SCHEMA_VERSION`
+  stays at 5, §17): `process_nonce` already carries it, and the compound check
+  is enforced entirely by the macOS-specific adapter branch (§9.1.3), never by
+  a schema change.
 - `teardown_requested_at` is the **one** permitted post-insert mutation — set
   in its own small update **before** `signalProcessTree` is called, so a crash
   during signalling can still be honestly classified on restart (§12 window
@@ -876,14 +886,67 @@ and never a substitute for the sidecar/nonce match, only an addition to it.
       durably stored `os_start_marker` for this binding**, using the *same*
       `os_start_marker_source` mechanism it was captured with.
 
-   Any of the three failing — sidecar missing/corrupt/mismatched, pid absent,
+   On **Windows** (`windows_creation_time`) and **Linux**
+   (`posix_proc_stat_starttime`), checks 1–3 are sufficient — both mechanisms
+   carry sub-second resolution, so an exact `os_start_marker` match already
+   defeats PID reuse, and this correction leaves that rule exactly as
+   previously accepted. On **macOS** (`os_start_marker_source =
+   'posix_ps_lstart'`), checks 1–3 are **necessary but not sufficient**: §9.1.3
+   below adds the mandatory compound proof.
+
+   Any of checks 1–3 failing — sidecar missing/corrupt/mismatched, pid absent,
    OS-marker unreadable, OS-marker disagreeing, or `os_start_marker_source =
    'unavailable'` for this binding (§8.1, §12 window L13) — →
    `{ kind: 'identity_unverifiable' }`. **No signal is ever sent.** This is the
    fail-closed path that specifically covers **PID reuse**: process A exits,
    the OS later reuses A's pid for an unrelated live process B, host restarts
    — B's current OS-marker will not equal A's durably stored spawn-time
-   marker, so B is never signalled (§12 window L12).
+   marker, so B is never signalled (§12 window L12). On macOS, checks 1–3
+   passing is **not** enough to reach this conclusion either way — §9.1.3's
+   additional checks must also pass before any signal is authorized.
+
+### 9.1.3 macOS-only compound identity proof (checks 1–3 are necessary, not sufficient)
+
+BSD `ps -o lstart=` reports whole-second resolution only (this repository's
+own existing `getPsProcessIdentity` / `daemon-process-identity-query.ts`
+precedent parses exactly this fixed-width field). Two distinct process
+instances — an exited process A and an unrelated live process B that the OS
+assigns A's now-free `pid` within the **same wall-clock second** — can carry
+an *identical* `os_start_marker` on macOS. Checks 1–3 alone would then wrongly
+treat B as A. **Bare `pid` + `lstart` must never authorize a restart-recovered
+signal on macOS.**
+
+When, and only when, `os_start_marker_source = 'posix_ps_lstart'`, the
+restart-recovered path requires **all** of the following — reusing the
+**same** `ps -p <pid> -o lstart= -o command=` observation this repository's
+`getPsProcessIdentity` (`src/main/daemon/daemon-process-identity-query.ts`)
+already performs for the daemon's own PID-reuse-safe identity check, never a
+new mechanism:
+
+1. the target pid currently exists (checks 1–3, unchanged);
+2. the live OS `lstart` exactly matches the durably stored `os_start_marker`
+   (checks 1–3, unchanged);
+3. the live OS command/argv (`command=`, from the **same** `ps` call as (2))
+   is successfully read;
+4. that live command/argv matches the expected synthetic shadow-lifecycle-
+   process shape (the S4 adapter's own fixed invocation prefix — never a real
+   workload command, §4 "Shadow lifecycle process");
+5. that live command/argv contains, verbatim, the exact durable
+   `processNonce` token this binding's sidecar/`dispatch_process_binding` row
+   holds — the stable argv token embedded at spawn time (§9.2 step 4).
+
+If check 3 cannot be read, or check 4 or 5 is ambiguous or disagrees —
+including a live argv that matches the synthetic shape but carries a
+**different** `processNonce` (e.g. an unrelated, later-spawned S4 shadow
+lifecycle process that happens to reuse the same pid, §12 window L12) — the
+result is `{ kind: 'identity_unverifiable' }` and **no signal is ever sent**,
+identically to a checks-1–3 failure. There is no partial-credit path: an
+unreadable, unavailable, or disagreeing check anywhere in 1–5 fails the whole
+proof closed. This is a **local synthetic proof only** — it does not, by
+itself, prove production executor identity parity, and any future
+`ORCA_DELEGATED` production process-handle acquisition (including SSH /
+remote execution identity, §5.1, §18) remains a separate hard prerequisite
+this correction does not satisfy.
 
 ### 9.2 Bind-time ordering (extends ORCA-S3 §7.6, DB ↔ filesystem ↔ process)
 
@@ -898,16 +961,23 @@ transaction, one seam:
    correlationId, orcaRunId, orcaDispatchId, processNonce, spawnedAt: null,
    pid: null, osStartMarker: null, osStartMarkerSource: null }`
    — temp file + `rename`, **before** the process exists (§4 new);
-4. **spawn** the shadow lifecycle process (`spawnProcess`, `detached: true`) →
-   obtain `pid`; **read the OS-observable process-instance discriminator**
-   for that `pid` via the best available local mechanism (§4) → obtain
-   `osStartMarker` (`null` + `osStartMarkerSource: 'unavailable'` if the host
-   cannot supply one, §12 window L13); **rewrite** the sidecar's `spawnedAt`,
-   `pid`, `osStartMarker`, and `osStartMarkerSource` in place (same
-   temp+rename discipline) now that spawn succeeded — the sidecar carries the
-   `pid` and OS-marker fields specifically so the pre-commit orphan class
-   (§10.3) is identity-corroborable from the sidecar alone, with no
-   dependency on a committed DB row (§4 new);
+4. **spawn** the shadow lifecycle process (`spawnProcess`, `detached: true`),
+   with `processNonce` embedded, verbatim, in a stable argv token on the
+   spawn command itself (e.g. a fixed `--processNonce=<processNonce>`-shaped
+   flag on the adapter's own synthetic-fixture invocation) — **on every
+   platform**, so the same spawn path is used everywhere even though only the
+   macOS branch (§9.1.3) ever reads it back; → obtain `pid`; **read the
+   OS-observable process-instance discriminator** for that `pid` via the best
+   available local mechanism (§4) → obtain `osStartMarker` (`null` +
+   `osStartMarkerSource: 'unavailable'` if the host cannot supply one, §12
+   window L13); **rewrite** the sidecar's `spawnedAt`, `pid`, `osStartMarker`,
+   and `osStartMarkerSource` in place (same temp+rename discipline) now that
+   spawn succeeded — the sidecar carries the `pid` and OS-marker fields
+   specifically so the pre-commit orphan class (§10.3) is
+   identity-corroborable from the sidecar alone, with no dependency on a
+   committed DB row (§4 new). The sidecar's own `processNonce` field (already
+   written in step 3) is the same value the macOS branch expects to find in
+   the live argv — no separate "expected identity" record is introduced;
 5. `BEGIN IMMEDIATE`;
 6. `INSERT run_binding` (ORCA-S1);
 7. `INSERT dispatch_worktree` (ORCA-S3);
@@ -968,9 +1038,13 @@ every `dispatch_process_binding` with no `dispatch_termination` yet:
   the live-handle branch above.
 - **Identity cannot be confirmed** — sidecar missing/corrupt/mismatched, a
   live pid the sidecar does not corroborate, an unreadable/ambiguous
-  OS-observable process-instance discriminator, **or a live pid whose current
+  OS-observable process-instance discriminator, a live pid whose current
   OS-marker disagrees with the durably stored spawn-time `os_start_marker`
-  (the PID-reuse case, §4, §12 window L12)** → `dispatch_lifecycle_incident(kind='process_identity_mismatch'`
+  (the PID-reuse case, §4, §12 window L12), **or, on macOS specifically, any
+  of the §9.1.3 compound-proof checks failing** (live argv unreadable, argv
+  not matching the expected synthetic shape, or argv missing the exact
+  durable `processNonce` token — even when `pid` and `lstart` both
+  match) → `dispatch_lifecycle_incident(kind='process_identity_mismatch'`
   or `'orphan_process_unverifiable')`, **blocked**, **no termination fact, no
   signal ever sent** (§7 forbidden; §14 LIFE-2). This is the case that
   concretely protects an unrelated process B that has reused process A's exited
@@ -1079,11 +1153,13 @@ neither gets a `correlation_id`-keyed durable fact; both are audit-logged only
   (`osStartMarker` / `osStartMarkerSource`) captured at spawn time, which is
   exactly what locating and corroborating a pre-commit orphan requires. For
   each: re-verify liveness + identity **against the sidecar's own `pid` and
-  OS-marker** (the full three-part discipline of §9.1's restart-recovered
-  path — sidecar/nonce match, pid-exists, and OS-marker match — **the same
-  PID-reuse protection applies here before any orphan signal**); if live and
-  verifiable, terminate it through the same pid-addressed entry point; either
-  way, delete the orphan sidecar once the process is confirmed gone.
+  OS-marker** (the full discipline of §9.1's restart-recovered path —
+  sidecar/nonce match, pid-exists, and OS-marker match, **plus, on macOS, the
+  §9.1.3 compound argv/nonce proof** — **the same PID-reuse protection
+  applies here before any orphan signal, with no platform exemption**); if
+  live and verifiable, terminate it through the same pid-addressed entry
+  point; either way, delete the orphan sidecar once the process is confirmed
+  gone.
   **Identity-unverifiable → skip, log, do not touch** — fail closed exactly as
   §9.3 requires; an orphan sweep is not exempt from the identity discipline the
   main sweep observes.
@@ -1163,7 +1239,11 @@ media; nothing commits them atomically together.** Windows are lettered `L1`–`
 (crash/restart) plus `L14` (§12.1 — a legitimate async state change, not a
 crash) to avoid collision with ORCA-S3's `A`–`G` (unchanged, unaffected — S4
 adds no interaction with S3's own steps). `L12` and `L13` and the §12.1 window
-are additions made by this correction (review findings B1/B2).
+are additions made by the prior focused correction (review findings B1/B2);
+`L12`'s macOS same-second sub-case and the §9.1.3 compound proof it depends on
+are added by this focused correction (the sole remaining re-review blocker —
+`posix_ps_lstart`'s whole-second resolution cannot by itself defeat PID
+reuse). Windows and Linux identity rules are unchanged by this correction.
 
 | # | Crash / classification point | Durable DB state | Process / filesystem state | S4 behaviour |
 | --- | --- | --- | --- | --- |
@@ -1178,7 +1258,7 @@ are additions made by this correction (review findings B1/B2).
 | **L9** | a duplicate callback/hook (e.g. a future `onChildTerminated`-style wake-up) fires twice for the same process exit | `dispatch_termination` PK forbids a second `INSERT`; `dispatch_lifecycle_event` composite PK forbids a second row | — | The hook is a **wake-up hint only, never a correctness source** (mirrors ORCA-S2 Appendix C's `onDispatchSettled` framing) — the sweep's own durable-state re-verification is authoritative regardless of how many times any callback fires (§14 LIFE-8). |
 | **L10** | an S4 write-transaction cannot acquire the SQLite write lock within the bounded busy-retry budget, or a projection rebuild is in progress against the one PROJECTION table (`dispatch_lifecycle_incident`) | no partial state | — | `LIFECYCLE_STORE_BUSY_RETRYABLE` — no durable row, no incident, not blocked, surfaced in the report, retried next sweep (mirrors ORCA-S2 §16.1 / ORCA-S3 gate 17 exactly). |
 | **L11** | host restarts mid-batch, with some bindings in the same sweep call already advanced through Phase 4 and others still at Phase 1 | mixed, per-binding | mixed, per-binding | Every phase's precondition is a durable fact (§11 fixed-point property) — the next sweep resumes each binding independently from wherever its own durable state left it; no binding is re-processed past its already-committed terminal fact, no binding is skipped. |
-| **L12** (new) | process A (bound to a `dispatch_process_binding` row) exits; before restart-recovery re-verification runs, the OS reuses A's now-free `pid` for an unrelated, live process B; host restarts | `dispatch_process_binding.pid` durably equals B's current pid (coincidental reuse); `os_start_marker` durably holds **A's** spawn-time marker | B is a real, unrelated, live process | Restart-recovered re-verification (§9.1.2) re-reads B's **current** OS-observable process-instance discriminator and compares it to A's durably stored `os_start_marker` — they disagree → `{ kind: 'identity_unverifiable' }`. **No signal is ever sent to B.** `dispatch_lifecycle_incident(kind='orphan_process_unverifiable')`; blocked; no termination fact fabricated for A. Sidecar-plus-pid-exists alone (pre-correction) would have wrongly treated B as A; this is the concrete scenario this correction closes. |
+| **L12** (new) | process A (bound to a `dispatch_process_binding` row) exits; before restart-recovery re-verification runs, the OS reuses A's now-free `pid` for an unrelated, live process B; host restarts | `dispatch_process_binding.pid` durably equals B's current pid (coincidental reuse); `os_start_marker` durably holds **A's** spawn-time marker | B is a real, unrelated, live process | Restart-recovered re-verification (§9.1.2) re-reads B's **current** OS-observable process-instance discriminator and compares it to A's durably stored `os_start_marker` — they disagree → `{ kind: 'identity_unverifiable' }`. **No signal is ever sent to B.** `dispatch_lifecycle_incident(kind='orphan_process_unverifiable')`; blocked; no termination fact fabricated for A. Sidecar-plus-pid-exists alone (pre-correction) would have wrongly treated B as A; this is the concrete scenario this correction closes. **macOS same-second sub-case (§9.1.3):** if B is reused within the **same wall-clock second** as A's exit, `posix_ps_lstart`'s whole-second resolution makes B's `lstart` **equal** to A's durably stored marker — checks 1–3 alone would wrongly pass. The §9.1.3 compound proof still fails closed: B's live argv either does not match the expected synthetic shape at all (B is a genuinely unrelated process), or — the sharper sub-case — B is itself **another S4 synthetic shadow lifecycle process** with the **same** command shape but a **different** `processNonce`; either way argv/nonce corroboration disagrees → `identity_unverifiable`, **no signal to B**, regardless of the `lstart` collision. |
 | **L13** (new) | the host cannot supply an OS-observable process-instance discriminator at spawn time (§9.1's capture fails or the capability is absent) | `dispatch_process_binding.os_start_marker = NULL`, `os_start_marker_source = 'unavailable'` | process spawned normally | The same-process-instance live-handle path (§9.1.1) is unaffected — a live `ChildProcess` handle does not depend on the OS marker. But **any** restart-recovered corroboration attempt for this binding is unconditionally `identity_unverifiable` (no durable baseline exists to compare against) — an accepted, honestly-reported limitation, never a fabricated pass. |
 
 ### 12.1 Late upstream contradiction window (not a crash — a legitimate async state change)
@@ -1202,6 +1282,7 @@ direct correction for review finding B1.
 | Process identity cannot be confirmed (sidecar absent/corrupt/mismatched) | `dispatch_lifecycle_incident(kind='process_identity_mismatch')`; blocked; **no termination fact, no signal**. |
 | Restart-recovered pid exists but the sidecar cannot corroborate it | `dispatch_lifecycle_incident(kind='orphan_process_unverifiable')`; blocked; **no signal sent**. |
 | Restart-recovered pid exists, sidecar/nonce match, but the pid's **current** OS-observable process-instance discriminator disagrees with, or is unreadable relative to, the durably stored `os_start_marker` (§4, §12 window L12) — covers PID reuse by an unrelated process | `dispatch_lifecycle_incident(kind='orphan_process_unverifiable')`; blocked; **no signal ever sent to the pid-reusing process**. |
+| **macOS only** (`os_start_marker_source = 'posix_ps_lstart'`): restart-recovered pid exists, sidecar/nonce match, and `lstart` exactly matches — but the live command/argv is unreadable, does not match the expected synthetic shape, or does not contain the exact durable `processNonce` token (§9.1.3, §12 window L12 same-second sub-case) | Always `identity_unverifiable` — `pid` + `lstart` agreement is **never** sufficient on macOS; `dispatch_lifecycle_incident(kind='orphan_process_unverifiable')`; blocked; **no signal ever sent**. |
 | Binding's `os_start_marker_source = 'unavailable'` (§12 window L13) and a restart-recovery corroboration is attempted | Always `identity_unverifiable` — no baseline exists; **no signal sent**, no fabricated pass. |
 | A `dispatch_lifecycle_closure` row's frozen `settlement_status_ref` no longer equals current `settlement_observation.status` (a later, legitimate ORCA-S2 Phase B transition, §8.0.1, §12 window L14) | Phase 5 (§11): set `post_closure_settlement_conflict_detected_at` (the one permitted closure mutation); `dispatch_lifecycle_incident(kind='post_closure_settlement_conflict')`, blocked; closure/event rows preserved byte-for-byte; future projection/copy of this closure blocked (§18). |
 | Transient error querying/signalling a process (not an identity question) | `LIFECYCLE_PROCESS_OPERATIONAL_RETRYABLE` — no row, no incident, not blocked, retried next sweep. |
@@ -1225,12 +1306,20 @@ direct correction for review finding B1.
   OS-observable process-instance discriminator re-read from the OS and
   compared exactly against the durably stored spawn-time value (§4, §9.1) —
   the corroborator that specifically distinguishes the original spawned
-  process from an unrelated process that later reuses the same pid.
-  Same-process-instance live-handle signals (§9.1.1) do not need the OS-marker
-  check, because a live `ChildProcess` handle cannot be confused with an
-  unrelated process. Identity uncertainty — including OS-marker disagreement,
-  unreadability, or unavailability — is **always** an incident or a skip,
-  never a guess.
+  process from an unrelated process that later reuses the same pid. **On
+  macOS specifically** (`os_start_marker_source = 'posix_ps_lstart'`), those
+  three checks are necessary but **not sufficient**: bare `pid` + `lstart`
+  agreement must never authorize a signal, because BSD `lstart` is
+  whole-second resolution and cannot alone defeat a same-second PID reuse.
+  Every macOS restart-recovered signal additionally requires the §9.1.3
+  compound proof — live argv readable, matching the expected synthetic shape,
+  and containing the exact durable `processNonce` token — with no
+  partial-credit path. Same-process-instance live-handle signals (§9.1.1) do
+  not need the OS-marker check, on any platform, because a live `ChildProcess`
+  handle cannot be confused with an unrelated process. Identity uncertainty —
+  including OS-marker disagreement, unreadability, or unavailability, and, on
+  macOS, argv unreadability, shape mismatch, or nonce mismatch — is **always**
+  an incident or a skip, never a guess.
 - **LIFE-3 — no premature or unconfined deletion.** `worktree_finalization`'s
   filesystem act runs only after `status='intent_recorded'` is durably
   committed, and only against a path `isInside` the configured durable
@@ -1357,7 +1446,14 @@ direct correction for review finding B1.
    discriminator match (§4, §9.1); seed a scenario where a `pid` recorded in
    `dispatch_process_binding` is reassigned to a genuinely unrelated live
    process before restart-recovery runs, and prove that unrelated process is
-   never signalled (`identity_unverifiable`, blocked, §12 window L12).
+   never signalled (`identity_unverifiable`, blocked, §12 window L12). **On
+   macOS specifically** (§9.1.3): prove that `pid` + `lstart` agreement *alone*
+   is never treated as sufficient — seed a same-wall-clock-second `lstart`
+   collision (an unrelated process, and separately another S4 synthetic
+   process with a different `processNonce`) and prove neither is ever
+   signalled; separately prove an unreadable live argv and a live argv
+   matching the synthetic shape but missing the exact `processNonce` token
+   both route to `identity_unverifiable` with no signal.
 8. **Idempotent replay** — the sweep run ×3 back-to-back, and again after a
    projection rebuild, produces a semantically-equivalent closed set: zero
    duplicate rows, zero extra incidents, zero duplicate real side effects
@@ -1366,8 +1462,9 @@ direct correction for review finding B1.
    (mirrors ORCA-S1/S2/S3's own pattern) proves each window's documented
    recovery behaviour, including that L3/L4/L5 converge on one shared
    recovery path, that L1 never fabricates an exit code or signal, that L12
-   never signals a pid-reusing unrelated process, and that L13 always routes a
-   marker-less binding's restart-recovered corroboration to
+   never signals a pid-reusing unrelated process (including its macOS
+   same-second sub-case, separately detailed by gate 25), and that L13 always
+   routes a marker-less binding's restart-recovered corroboration to
    `identity_unverifiable`. **Late upstream contradiction (§12.1 L14)** is
    separately proven by gate 23.
 10. **Orphan reconciliation** — seed both orphan classes (§10.3: an
@@ -1441,6 +1538,42 @@ direct correction for review finding B1.
     OS-observable process-instance discriminator disagrees, the unrelated
     process is never signalled, `dispatch_lifecycle_incident(kind='orphan_process_unverifiable')`
     is raised, and the binding is blocked, not silently resolved.
+25. **macOS compound identity proof — timestamp equality alone must not pass**
+    (§9.1.3, §12 window L12 macOS sub-case, LIFE-2). Runs only where the
+    harness's `os_start_marker_source` is (or is faked as) `'posix_ps_lstart'`;
+    must provide executable evidence, not merely spec prose, that:
+    - a same-wall-clock-second `lstart` **collision alone is insufficient**:
+      construct (or fake at the adapter seam) a case where the reused pid's
+      live `lstart` exactly equals the durably stored spawn-time marker, and
+      prove the adapter does **not** authorize a signal from checks 1–3 alone
+      — it must proceed to evaluate argv/nonce before any verdict is reached;
+    - **exact `processNonce`-bearing argv corroboration is required**: with
+      the same `lstart` collision in place, seed a live process whose argv
+      matches the expected synthetic shadow-lifecycle shape but carries a
+      **different** `processNonce` (including the sharper case where that
+      live process is itself another genuine S4 shadow lifecycle process) and
+      prove it is classified `identity_unverifiable` and never signalled;
+      then seed the **matching** `processNonce` on the *originally spawned*
+      process across a real (non-faked) restart and prove that one **is**
+      correctly recovered and signallable — a positive control, so the test
+      suite cannot pass by simply never signalling anything;
+    - **mismatch/unreadability fails closed**: an unreadable live argv (e.g. a
+      permission or transient `ps` failure) and a live argv that matches the
+      synthetic shape but is missing the `processNonce` token entirely both
+      independently route to `identity_unverifiable`, never a fabricated pass
+      and never a retryable;
+    - **no unrelated process ever receives a signal** across every scenario
+      above — assert on the actual `kill`/`admitProcessTreeKill` call surface
+      (e.g. a spy or an unsignallable sentinel target), not only on the
+      returned classification, so a bug that classifies correctly but signals
+      anyway would still fail the gate.
+
+    The acceptance evidence for this gate must not claim it proves production
+    executor identity parity (§5, gate 21) — it proves only that S4's local
+    synthetic macOS proof is sound against same-second PID reuse. It does not
+    extend to, and must not be cited as evidence for, remote/SSH execution
+    identity (§5.1, §18), which remains a separate hard `ORCA_DELEGATED`
+    prerequisite.
 
 ## 17. Rollback
 
@@ -1620,7 +1753,15 @@ work, mirrors ORCA-S3 B5); `settlement_incident` / `worktree_provenance_incident
     **every** restart-recovered signal attempt, before the sidecar/nonce/pid
     check is treated as sufficient? Can any code path reach
     `requestTermination` on the restart-recovered path without that
-    comparison having passed?
+    comparison having passed? **On macOS specifically (§9.1.3, gate 25):** can
+    any code path authorize a restart-recovered signal from `pid` + `lstart`
+    agreement alone, without also reading and matching the live argv against
+    the expected synthetic shape and the exact durable `processNonce` token?
+    Is the live argv genuinely re-read from the OS on every macOS
+    restart-recovered attempt (never assumed from the sidecar), and does an
+    unreadable, mismatched, or nonce-differing argv route to
+    `identity_unverifiable` with certainty, including when the reused pid
+    belongs to another genuine S4 synthetic process of the same shape?
 18. **No claimed remote parity (§5.1)** — does any test, report, or doc
     comment introduced by this slice claim that its local synthetic identity
     proof (pid, sidecar, OS-observable process-instance discriminator)

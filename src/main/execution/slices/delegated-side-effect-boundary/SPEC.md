@@ -159,13 +159,17 @@ S4 adds, all Execution-owned (new files):
   `worktree_provenance_incident`) — **projection / evidence, rebuildable**;
 - the `dispatch_lifecycle_closure` aggregate (§8.5) and its SQLite store — the
   Maestro-native **execution-attempt-equivalent lifecycle closure** fact
-  (explicitly **not** aiControlCenter's `execution_attempts` — §4) —
-  **projection, rebuildable** from the four SOURCE/incident facts above plus
-  ORCA-S2/S3's own durable facts;
+  (explicitly **not** aiControlCenter's `execution_attempts` — §4) — **durable
+  SOURCE state, write-once, never projection-rebuilt** (§8.0): it is a frozen,
+  point-in-time historical reference over ORCA-S2/S3 facts that themselves
+  remain legitimately mutable after closure (§8.0.1), so it can never be safely
+  re-derived from "current" upstream state;
 - the `dispatch_lifecycle_event` aggregate (§8.6) and its SQLite store — the
   durable, idempotent record that a terminal event **would be** emitted exactly
-  once under shadow — **projection, rebuildable** from `dispatch_lifecycle_closure`;
-  **no real external delivery** (§4, §11);
+  once under shadow — **durable SOURCE state, write-once, never
+  projection-rebuilt** (§8.0), a frozen point-in-time record over the
+  now-immutable `dispatch_lifecycle_closure` it references; **no real external
+  delivery** (§4, §11);
 - a `ShadowLifecycleProcessPort` (application) + one infrastructure adapter
   that spawns, observes, and tears down the **synthetic shadow lifecycle
   process** (§9) — extends, never duplicates, `src/shared/child-process/`;
@@ -240,21 +244,30 @@ or ORCA-S3's own `LEGACY_BINDING_NOT_CONVERGEABLE`), S4 durably (a) tracks the
 lifecycle of one **synthetic, Execution-spawned shadow process** bound to that
 dispatch's identity from spawn (`dispatch_process_binding`, SOURCE) through
 observed termination (`dispatch_termination`, SOURCE) with **fail-closed
-identity verification** before any signal is sent and **never** a bare-pid
-kill; (b) governs the finalization (reap) of that dispatch's durable ORCA-S3
+identity verification — sidecar/nonce match, pid-exists, and, on the
+restart-recovered path, an OS-observable process-instance discriminator match
+that specifically defeats PID reuse (§4, §9.1)** — before any signal is sent
+and **never** a bare-pid kill; (b) governs the finalization (reap) of that
+dispatch's durable ORCA-S3
 shadow worktree exactly once, recording durable intent **before** the
 filesystem act and durable result **after** it
 (`worktree_finalization`, SOURCE), tolerant of a crash at any point between; (c)
-records **at most one** `dispatch_lifecycle_closure` row per `correlation_id` —
-the Maestro-native, Execution-owned, advisory analogue of "execution-attempt
-closure" — that **copies references to, and never re-decides**, the settlement,
-provenance, termination, and finalization facts it closes over; (d) records
-**at most one** `dispatch_lifecycle_event` row per `correlation_id` proving
-terminal-event emission is idempotent under shadow, with **no real external
-delivery**; (e) raises a **blocking `dispatch_lifecycle_incident`** (S4's own
-channel) on any process-identity mismatch, unverifiable orphan, or
-finalization-eligibility digest conflict — **never** a fabricated termination,
-finalization, or closure fact; and (f) separately reaps ORCA-S3's own
+records **at most one** `dispatch_lifecycle_closure` row per `correlation_id`,
+**durable SOURCE state, immutable except one permitted post-closure marker
+(§8.5, §11 Phase 5)** — the Maestro-native, Execution-owned, advisory analogue
+of "execution-attempt closure" — that **copies references to, and never
+re-decides**, the settlement, provenance, termination, and finalization facts
+it closes over, **and is never rewritten even after a later, legitimate
+ORCA-S2 `observed → observed_conflicted` transition for the same binding**
+(§8.0.1); (d) records **at most one** `dispatch_lifecycle_event` row per
+`correlation_id`, **also durable SOURCE state**, proving terminal-event
+emission is idempotent under shadow, with **no real external delivery**; (e)
+raises a **blocking `dispatch_lifecycle_incident`** (S4's own channel) on any
+process-identity mismatch (including OS-marker disagreement on the
+restart-recovered path, §4, §9.1), unverifiable orphan,
+finalization-eligibility digest conflict, or post-closure settlement
+contradiction — **never** a fabricated termination, finalization, or closure
+fact; and (f) separately reaps ORCA-S3's own
 window-A–C filesystem orphans and S4's own pre-commit process-spawn orphans,
 governed by a bounded grace period and identity re-verification, **never** by a
 bare-pid or bare-path guess. **No `data/app.db` write, no `finalizeRunOnce`, no
@@ -268,7 +281,8 @@ process or real worktree touched**; authority stays `AICONTROL_NATIVE`.
 | Term | Meaning in this slice |
 | --- | --- |
 | Shadow lifecycle process | A synthetic, Execution-spawned Node child process — **not** a workload executor, **not** proof of production process-handle acquisition — whose sole purpose is to give S4 a real OS process/process-group to durably bind, observe, and tear down. Spawned via `spawnProcess` (`src/shared/child-process/`), `detached: true` (own POSIX process group). |
-| Process identity | `{ correlationId, orcaRunId, orcaDispatchId, processNonce }` — Execution-minted at spawn time, written to a process identity sidecar **before** spawning, persisted verbatim on `dispatch_process_binding`. `pid` is corroborating only — **never** identity by itself (pids recycle). |
+| Process identity | `{ correlationId, orcaRunId, orcaDispatchId, processNonce }` — Execution-minted at spawn time, written to a process identity sidecar **before** spawning, persisted verbatim on `dispatch_process_binding`. `pid` is corroborating only — **never** identity by itself (pids recycle). **Neither `pid` nor the sidecar's presence, alone or together, distinguishes the original spawned process from an unrelated process that later reuses the same `pid`** — restart-recovered corroboration additionally requires the OS-observable process-instance discriminator below (§9.1). |
+| OS-observable process-instance discriminator | `osStartMarker` (+ `osStartMarkerSource`) — an opaque, host-supplied value that identifies *this specific OS process instance*, not merely its `pid`, captured once at spawn (§9.2) and re-read from the OS (never from the sidecar or the DB) at restart-recovery time for exact comparison. Sourced from the **same** primitives this repository already uses elsewhere for PID-reuse-safe identity: Windows native process creation-time (`isWindowsProcessStartTimeAvailable` / `creationTimeMs`, `src/main/windows/windows-process-table.ts`); POSIX `/proc/<pid>/stat`'s own `starttime` field on Linux (stable — ticks since boot, unlike the elapsed-seconds `ps etimes=` column, which is **not** a valid discriminator because it changes every read); `ps -o lstart=` absolute wall-clock start time on macOS (`src/shared/process-table-snapshot.ts`). **Never** identity by itself either — it corroborates the sidecar/nonce match, and both must agree. |
 | Termination fact | `dispatch_termination` — the durable, one-time capture of an **ephemeral, non-replayable** OS event (a process's exit). Unlike ORCA-S3's Git-derived facts, once the process is reaped there is **no durable source left to re-derive this from** — see §8.0. |
 | Worktree finalization | The governed act of reaping (deleting) a durable ORCA-S3 shadow worktree once it is provably no longer needed by any future provenance read. Intent is recorded **before** the filesystem act; result **after** it (§10). |
 | Dispatch lifecycle closure | `dispatch_lifecycle_closure` — the Maestro-native, Execution-owned, advisory analogue of "execution-attempt closure." **Not** aiControlCenter's `execution_attempts` table (that table does not exist in this repository — `GAP-ANALYSIS-ORCA-DELEGATED.md` §3). A write-once reference aggregate over already-durable facts; it **copies, never re-decides**, what those facts already say. |
@@ -318,14 +332,40 @@ separate and orthogonal — Slice B may need production process-handle
 acquisition without ever needing real executor parity, and vice versa; neither
 is assumed to imply the other (`GAP-ANALYSIS-ORCA-DELEGATED.md` §6.2).
 
+### 5.1 SSH / remote execution boundary
+
+**S4 itself proves only the local synthetic shadow process lifecycle.** Every
+process S4 spawns, observes, and tears down is a child of the **local** host
+running the composition root; `spawnProcess`, `signalProcessTree`, and
+`admitProcessTreeKill` all assume a local OS process table, and the OS-observable
+process-instance discriminator added by this correction (§4, §9.1) is read
+through local-host primitives (`windows-process-table.ts`, `/proc/<pid>/stat`,
+local `ps`). **None of this is assumed to apply, unmodified, to a real
+delegated workload running on a remote execution host** (`docs/reference/ssh-execution-boundary.md`):
+per that document's rule, "the execution host owns everything that touches
+execution," and "loss of contact is not evidence of `exited`" — the fixed
+vocabulary is **`live` / `unverifiable` / `exited`**, with no synonyms.
+
+This slice's own `identity_unverifiable` observation (§9.1) is a **local-host,
+OS-corroboration-specific** concept; it is not, and must not be presented as,
+the same contract as the project's `live`/`unverifiable`/`exited` SSH verdict
+model, though the discipline is the same in spirit ("no asserting what you
+cannot observe"). Consequently, **production process-handle acquisition**
+(already a hard `ORCA_DELEGATED` entry criterion, §18) must, for any delegated
+dispatch that may execute on a remote host, **also define its own
+identity/verdict model compatible with remote execution** — bare local
+PID-existence-plus-signal semantics do not transfer to an SSH host, and Slice B
+may not claim this slice's local synthetic proof as evidence of remote parity.
+
 ## 6. Inputs / outputs
 
 **Inputs (read-only to the sweep, except where §9/§10 note a real side
 effect):**
 
 - Execution store: `run_binding`, `run_reservation`, `settlement_observation`
-  (ORCA-S2), `worktree_provenance`, `dispatch_worktree` (ORCA-S3), and the four
-  new S4 SOURCE/incident tables.
+  (ORCA-S2), `worktree_provenance`, `dispatch_worktree` (ORCA-S3), and the six
+  new S4 tables — including `dispatch_lifecycle_closure`, which Phase 5 (§11)
+  re-reads on every sweep against **current** `settlement_observation.status`.
 - The durable ORCA-S3 shadow-worktree root's `worktrees/` and `identity/`
   subtrees (read, and — only when eligible, §10 — deleted).
 - The durable shadow-lifecycle-root's `process/` subtree (the S4 process
@@ -342,10 +382,12 @@ effect):**
 - `dispatch_termination` rows (write-once per `correlation_id`).
 - `worktree_finalization` rows (write-once intent, then one permitted
   `status` transition to `finalized` / `skipped_not_eligible` / `conflicted`).
-- `dispatch_lifecycle_incident` rows for the four S4 `kind`s (blocking,
+- `dispatch_lifecycle_incident` rows for the five S4 `kind`s (blocking,
   non-fabricating) — **never** `settlement_incident` or
   `worktree_provenance_incident`.
-- `dispatch_lifecycle_closure` rows (write-once per `correlation_id`).
+- `dispatch_lifecycle_closure` rows (write-once per `correlation_id`, plus the
+  one permitted `post_closure_settlement_conflict_detected_at` mutation, §7,
+  §11 Phase 5).
 - `dispatch_lifecycle_event` rows (write-once per `(correlation_id,
   event_kind)`).
 - A real, verified termination of the synthetic shadow lifecycle process
@@ -388,7 +430,15 @@ itself spawn/create under Execution's own shadow roots.
   semantic contradiction (§8.4), never fabricated.
 - `dispatch_lifecycle_closure: (absent) → present` — **once**, after
   termination and finalization both reach a terminal status, referencing
-  (never re-deciding) the constituent facts.
+  (never re-deciding) the constituent facts. Every `*_ref` column and
+  `closure_digest` is immutable from this point on (§8.5).
+- `dispatch_lifecycle_closure.post_closure_settlement_conflict_detected_at:
+  NULL → <timestamp>` — the **one** permitted post-insert mutation on this
+  otherwise-immutable row (mirrors `dispatch_process_binding.teardown_requested_at`,
+  §8.1), set **once** by the Phase 5 reconciliation (§11) when it discovers
+  that `settlement_observation.status` for this `correlation_id` no longer
+  equals the closure's frozen `settlement_status_ref` (§8.5, §14 LIFE-15). It
+  never touches `settlement_status_ref` or any other `*_ref` column.
 - `dispatch_lifecycle_event: (absent) → present` — **once** per
   `(correlation_id, event_kind)`, after closure.
 - `(no state change) — LEGACY_BINDING_NOT_LIFECYCLE_MANAGED` — a pre-S4
@@ -413,6 +463,18 @@ itself spawn/create under Execution's own shadow roots.
 - Any `dispatch_lifecycle_closure` or `dispatch_lifecycle_event` row written
   from anything other than already-durable constituent facts (no synthesized
   termination outcome, no synthesized finalization outcome).
+- Any rewrite of an existing `dispatch_lifecycle_closure`'s `*_ref` columns or
+  `closure_digest`, ever — including after a later ORCA-S2 Phase B transitions
+  `settlement_observation.status` for the same `correlation_id`. **No
+  replacement closure row is ever fabricated for a `correlation_id` that
+  already has one** (PK forbids it structurally; no code path may work around
+  that by deleting and re-inserting).
+- Signalling a process, on the restart-recovered path, without an OS-observable
+  process-instance discriminator match **in addition to** the sidecar/nonce
+  match (§4, §9.1) — sidecar-plus-pid-exists alone is insufficient.
+- Treating a `dispatch_lifecycle_closure`'s `settlement_status_ref` as current
+  truth once `post_closure_settlement_conflict_detected_at` is set — any future
+  `ORCA_DELEGATED` projection/copy of that closure is blocked (§11, §18).
 - Any write to `data/app.db`, `agent_runs`, `settlement_incident`,
   `worktree_provenance`, `worktree_provenance_incident`, `parity_observation`;
   any `finalizeRunOnce` call in any mode; any real external terminal-event
@@ -450,11 +512,36 @@ worktree is deleted, there is no Git object left to re-derive `base_commit`
 from. **`dispatch_process_binding`, `dispatch_termination`, and
 `worktree_finalization` are therefore SOURCE, not PROJECTION** — they are the
 **only** durable record of an event that cannot be re-observed, and a
-projection rebuild must never drop them (§8.8). `dispatch_lifecycle_incident`,
-`dispatch_lifecycle_closure`, and `dispatch_lifecycle_event` remain
-**PROJECTION**: each is a pure, deterministic function of already-durable
-SOURCE facts (S4's own, plus ORCA-S2/S3's), so a projection rebuild may safely
-drop and regenerate them.
+projection rebuild must never drop them (§8.8). Only `dispatch_lifecycle_incident`
+remains **PROJECTION**: it is a pure, deterministic function of already-durable
+SOURCE facts (S4's own, plus the immutable-once-written `dispatch_process_binding`
+row a `worktree_finalization_conflict` incident's evidence is drawn from — never
+a fresh read of a mutable upstream status), so a projection rebuild may safely
+drop and regenerate it (§8.4, §8.8).
+
+#### 8.0.1 A second, independent reason `dispatch_lifecycle_closure` and `dispatch_lifecycle_event` are SOURCE
+
+Unlike the ephemeral-origin argument above, `dispatch_lifecycle_closure` and
+`dispatch_lifecycle_event` are durable records of facts that *could*, in
+principle, still be read today — but that is exactly the trap. ORCA-S2's
+frozen contract (`durable-settlement-observation/SPEC.md` §7/§13) permits
+`settlement_observation.status: 'observed' → 'observed_conflicted'` on **any**
+future Phase B sweep, indefinitely — there is no quiescence point after which
+S2 promises the status can no longer change, and this SPEC creates none (S2 is
+never modified to add one). `dispatch_lifecycle_closure.settlement_status_ref`
+is a **copy of that status made at one specific closure instant** (§8.5, LIFE-5:
+"copies, never re-decides"). If `dispatch_lifecycle_closure` were classified
+PROJECTION and a rebuild re-derived it by re-reading **current**
+`settlement_observation.status`, a rebuild performed after a legitimate later
+`observed → observed_conflicted` transition would silently produce a
+**different** row than the one originally written — not a byte-for-byte
+reproduction, a **fabricated retroactive rewrite** of a historical fact under
+the guise of "rebuilding." That is precisely what SOURCE classification
+exists to forbid. **`dispatch_lifecycle_closure` and `dispatch_lifecycle_event`
+are therefore SOURCE**: the durable, one-time, honest record of what the
+upstream facts said *at closure time*, never re-derived from — and never
+required to agree with — current upstream state. §11 Phase 5 and §14 LIFE-15
+define how a later contradiction is surfaced without ever touching these rows.
 
 ### 8.1 `dispatch_process_binding` — durable SOURCE state (spawn-time identity)
 
@@ -466,6 +553,8 @@ dispatch_process_binding (
   process_nonce     TEXT NOT NULL,      -- immutable Execution-minted random id
   pid               INTEGER NOT NULL,   -- corroborating only; never identity by itself
   kill_scope        TEXT NOT NULL,      -- 'posix-process-group' | 'win-taskkill-tree'
+  os_start_marker        TEXT,          -- opaque OS-observed process-instance discriminator; NULL when the host could not supply one at spawn time (§9.1, §12 window L13)
+  os_start_marker_source TEXT NOT NULL, -- 'windows_creation_time' | 'posix_proc_stat_starttime' | 'posix_ps_lstart' | 'unavailable'
   spawned_at        TEXT NOT NULL,
   teardown_requested_at TEXT            -- set durably BEFORE signalProcessTree is called (§9.3, window L6)
 )
@@ -475,9 +564,23 @@ CREATE INDEX IF NOT EXISTS dispatch_process_binding_by_correlation ON dispatch_p
 - Written **once**, at the bind-time seam (§9.2), in the **same** SQLite
   transaction as `run_binding` and `dispatch_worktree`. The matching **process
   identity sidecar** (`<durableShadowLifecycleRoot>/process/<orcaDispatchId>.json`
-  = `{ correlationId, orcaRunId, orcaDispatchId, processNonce, spawnedAt }`) is
-  written atomically (temp + `rename`) **before** the process is spawned and
-  **before** the transaction opens (§9.2).
+  = `{ correlationId, orcaRunId, orcaDispatchId, processNonce, spawnedAt, pid,
+  osStartMarker, osStartMarkerSource }`) is written atomically (temp +
+  `rename`) **before** the process is spawned and **before** the transaction
+  opens (§9.2). The sidecar carries `pid` and the OS-marker fields (not just
+  `processNonce`) **specifically so the pre-commit orphan class (§10.3) can be
+  located and identity-corroborated from the sidecar alone** — a committed
+  `dispatch_process_binding` row is never a prerequisite for discovering or
+  safely reaping that orphan class.
+- `os_start_marker` is captured **once**, immediately after `spawn()` returns a
+  `pid` (§9.2 step 4), using the best available local-host mechanism (§4). If
+  the host cannot supply one, `os_start_marker` is `NULL` and
+  `os_start_marker_source='unavailable'` — spawning still proceeds (S4's
+  synthetic fixture is not blocked on this capability), but **every future
+  restart-recovered corroboration attempt for this binding is unconditionally
+  `identity_unverifiable`**, because there is no durable baseline to compare
+  against (§9.1, §12 window L13). This never affects the same-process-instance
+  live-handle path (§9.1.1), which does not depend on the OS marker at all.
 - `teardown_requested_at` is the **one** permitted post-insert mutation — set
   in its own small update **before** `signalProcessTree` is called, so a crash
   during signalling can still be honestly classified on restart (§12 window
@@ -548,7 +651,7 @@ dispatch_lifecycle_incident (
   correlation_id   TEXT NOT NULL REFERENCES run_reservation(correlation_id),
   orca_dispatch_id TEXT,
   slice_ref        TEXT NOT NULL,
-  kind             TEXT NOT NULL,      -- process_identity_mismatch | orphan_process_unverifiable | worktree_finalization_conflict | orphan_worktree_unverifiable
+  kind             TEXT NOT NULL,      -- process_identity_mismatch | orphan_process_unverifiable | worktree_finalization_conflict | orphan_worktree_unverifiable | post_closure_settlement_conflict
   evidence_digest  TEXT NOT NULL,
   detail_json      TEXT NOT NULL,      -- observed durable facts only; NO invented state
   blocked          INTEGER NOT NULL DEFAULT 1,
@@ -570,13 +673,29 @@ CREATE INDEX IF NOT EXISTS dispatch_lifecycle_incident_by_slice
 - Rules mirror ORCA-S2 §13 / ORCA-S3 §7.3: a retry on the same evidence is a
   UNIQUE-index no-op; genuinely different evidence is a new row; **never**
   auto-resolved. `detail_json` contains only what was observed.
-- **Classified PROJECTION** (not SOURCE): a re-sweep against the **same**
+- **Classified PROJECTION** (not SOURCE) — and, after this correction, **the
+  only S4 table so classified** (§8.0, §8.0.1): a re-sweep against the **same**
   underlying SOURCE contradiction reliably re-raises the same
   `evidence_digest` — the contradiction, not the incident row, is what's
-  durable. A projection rebuild drops and regenerates it exactly like ORCA-S3
-  §7.5 drops `worktree_provenance_incident`.
+  durable. Four of the five `kind`s are evidenced entirely from S4's own
+  immutable SOURCE rows (`dispatch_process_binding`, `dispatch_termination`,
+  `worktree_finalization`). `post_closure_settlement_conflict` is evidenced in
+  part from `settlement_observation.status`, which **is** mutable — but this
+  does **not** reproduce `dispatch_lifecycle_closure`'s problem (§8.0.1),
+  because the incident never claims to *freeze* what that status was; it
+  freezes (in `detail_json`) only what Phase 5 (§11) **observed at the moment
+  it ran**, exactly like every other incident already does with its own
+  observed evidence. A rebuild re-runs Phase 5's comparison against whatever
+  `settlement_observation.status` reads **at rebuild time** — the same instant
+  a fresh sweep would — so it reproduces an equivalent row **unless the status
+  has changed again in the interim**, in which case a **new** incident with a
+  new `evidence_digest` is the correct outcome (§8.4 rule below), not a stale
+  reproduction. This mirrors how every other incident kind already tolerates
+  re-evidencing: nothing here fabricates or backdates. A projection rebuild
+  drops and regenerates this table exactly like ORCA-S3 §7.5 drops
+  `worktree_provenance_incident`.
 
-### 8.5 `dispatch_lifecycle_closure` — the closure fact (PROJECTION)
+### 8.5 `dispatch_lifecycle_closure` — the closure fact (SOURCE — corrected from PROJECTION)
 
 ```
 dispatch_lifecycle_closure (
@@ -589,21 +708,32 @@ dispatch_lifecycle_closure (
   termination_method_ref  TEXT NOT NULL,   -- copy of dispatch_termination.termination_method
   finalization_status_ref TEXT NOT NULL,   -- copy of worktree_finalization.status
   closure_digest          TEXT NOT NULL,   -- SHA-256 over the four *_ref columns only
-  closed_at               TEXT NOT NULL
+  closed_at               TEXT NOT NULL,
+  post_closure_settlement_conflict_detected_at TEXT -- NULL unless Phase 5 (§11) later finds settlement_observation.status has diverged from settlement_status_ref
 )
 ```
 
 - Written **once** per `correlation_id`, after `dispatch_termination` exists
-  and `worktree_finalization.status ∈ {finalized, skipped_not_eligible}`.
-  Every column immutable thereafter — this is the row Slice B will one day
-  **copy, never re-decide**, into `data/app.db` (§18).
-- `closure_digest` excludes `closed_at` and every id — mirrors ORCA-S3
-  PROV-2's exclusion discipline exactly.
-- **PROJECTION**: rebuildable, because all four `*_ref` inputs are themselves
-  already-durable facts (three S4 SOURCE rows' terminal columns, plus ORCA-S2's
-  `settlement_observation.status` and ORCA-S3's `worktree_provenance.status`),
-  none of which requires re-reading anything ephemeral. A rebuild + re-sweep
-  reproduces a byte-for-byte-equivalent row (excluding `closed_at`).
+  and `worktree_finalization.status ∈ {finalized, skipped_not_eligible}`. Every
+  column **except** `post_closure_settlement_conflict_detected_at` is immutable
+  thereafter — this is the row Slice B will one day **copy, never re-decide**,
+  into `data/app.db` (§18), **unless** that one column is set, in which case
+  Slice B must refuse to copy it until the contradiction is resolved (§7, §18).
+- `closure_digest` excludes `closed_at` and every id, and also excludes
+  `post_closure_settlement_conflict_detected_at` (local metadata, added after
+  the digest's own inputs were fixed) — mirrors ORCA-S3 PROV-2's exclusion
+  discipline exactly.
+- **SOURCE — never dropped or regenerated by a projection rebuild** (§8.0.1):
+  although all four `*_ref` inputs were themselves already-durable facts *at
+  closure time*, ORCA-S2's frozen contract permits `settlement_observation.status`
+  to legitimately change on a **later** Phase B sweep (`observed →
+  observed_conflicted`, with no quiescence point ever promised or introduced
+  here). A "rebuild" that re-read current upstream state instead of trusting
+  this frozen row would silently disagree with what was true at closure time —
+  that is a fabrication, not a reproduction. This row is therefore the durable,
+  one-time, honest record of what the constituent facts said *then*; a later
+  divergence is surfaced by Phase 5 (§11) via the one permitted mutation above,
+  **never** by rewriting or replacing this row (LIFE-15).
 - **This is NOT aiControlCenter's `execution_attempts` table.** It is a
   Maestro-native, Execution-owned, advisory reference aggregate. It never
   copies or infers *outcome semantics* — `settlement_status_ref` is a plain
@@ -611,7 +741,7 @@ dispatch_lifecycle_closure (
   a terminal outcome *means* (§G item 6 discipline, one level up — see §14
   LIFE-11).
 
-### 8.6 `dispatch_lifecycle_event` — idempotent emission record (PROJECTION)
+### 8.6 `dispatch_lifecycle_event` — idempotent emission record (SOURCE — corrected from PROJECTION)
 
 ```
 dispatch_lifecycle_event (
@@ -632,7 +762,14 @@ dispatch_lifecycle_event (
   already-immutable closure — not to perform real emission. A future Slice B
   emitter is a **separate, additive** decision under its own contract; this
   table is not it.
-- **PROJECTION**: a pure function of `dispatch_lifecycle_closure`; rebuildable.
+- **SOURCE — never dropped or regenerated by a projection rebuild** (§8.0.1):
+  it captures the point-in-time fact that emission fired against a specific
+  `closure_digest_ref`. `dispatch_lifecycle_closure` is itself now SOURCE and
+  immutable (except the one post-closure marker, §8.5), so this row's inputs
+  do not drift — but it is still classified SOURCE rather than PROJECTION for
+  the same reason as its parent: an emission record is evidence of a discrete
+  historical act ("emission fired at time T"), not a value a rebuild is
+  entitled to silently recompute and overwrite.
 
 ### 8.7 Prospective eligibility (mirrors ORCA-S3 C3)
 
@@ -648,26 +785,29 @@ activation over N historical ORCA-S1/S2/S3 bindings therefore produces **0**
 S4 rows and **0** S4 incidents, exactly mirroring ORCA-S3's own first-activation
 proof (S3 gate 18).
 
-### 8.8 Source state vs projection (summary)
+### 8.8 Source state vs projection (summary — corrected)
 
 - **SOURCE — never dropped by a projection rebuild:** `dispatch_process_binding`,
-  `dispatch_termination`, `worktree_finalization`, plus everything ORCA-S1–S3
-  already classify SOURCE (`run_binding`, `dispatch_worktree`, `execution_meta`,
-  the durable shadow worktree files, the durable process identity sidecars).
-- **PROJECTION — the only tables an S4 projection rebuild drops + recreates:**
-  `dispatch_lifecycle_incident`, `dispatch_lifecycle_closure`,
-  `dispatch_lifecycle_event`. The rebuild helper mirrors ORCA-S3's: `DROP TABLE
-  IF EXISTS dispatch_lifecycle_event; DROP TABLE IF EXISTS
-  dispatch_lifecycle_incident; DROP TABLE IF EXISTS dispatch_lifecycle_closure;
-  <PROJECTION_SQL>` — it never touches the three SOURCE tables above, the
-  durable shadow worktree files, or the process identity sidecars.
+  `dispatch_termination`, `worktree_finalization`, `dispatch_lifecycle_closure`,
+  `dispatch_lifecycle_event` (§8.0, §8.0.1 — closure/event corrected from
+  PROJECTION to SOURCE by this review pass), plus everything ORCA-S1–S3 already
+  classify SOURCE (`run_binding`, `dispatch_worktree`, `execution_meta`, the
+  durable shadow worktree files, the durable process identity sidecars).
+- **PROJECTION — the only S4 table a projection rebuild drops + recreates:**
+  `dispatch_lifecycle_incident`. The rebuild helper is now a single-table
+  operation: `DROP TABLE IF EXISTS dispatch_lifecycle_incident;
+  <PROJECTION_SQL>` — it never touches any SOURCE table above, the durable
+  shadow worktree files, or the process identity sidecars, and — after this
+  correction — never touches `dispatch_lifecycle_closure` or
+  `dispatch_lifecycle_event` either.
 - After a rebuild + a fresh `convergeDelegationBoundaryLifecycle` against the
-  **same** durable SOURCE state, every regenerated `dispatch_lifecycle_closure`
-  matches the pre-rebuild row on every `*_ref` column and `closure_digest`;
-  every regenerated `dispatch_lifecycle_event` matches on
-  `closure_digest_ref`; every regenerated incident matches on `{correlation_id,
-  kind, evidence_digest, detail_json, blocked}`. Local metadata (`closed_at`,
-  `emitted_at`, `raised_at`, incident `id`) is excluded from the comparison.
+  **same** durable SOURCE state, every regenerated `dispatch_lifecycle_incident`
+  matches the pre-rebuild row on `{correlation_id, kind, evidence_digest,
+  detail_json, blocked}` (local metadata — `raised_at`, incident `id` —
+  excluded from the comparison). `dispatch_lifecycle_closure` and
+  `dispatch_lifecycle_event` are **not** regenerated by a rebuild at all —
+  gate 4 (§16) instead asserts they survive a rebuild **byte-for-byte,
+  untouched**, exactly like the three original SOURCE tables.
 
 ## 9. Process lifecycle — port, adapter, and bind-time ordering
 
@@ -678,10 +818,12 @@ ShadowLifecycleProcessPort {
   spawn(input: {
     correlationId: string; orcaRunId: string; orcaDispatchId: string
     processNonce: string; identitySidecarPath: string
-  }): { pid: number; killScope: 'posix-process-group' | 'win-taskkill-tree'; handle: ChildProcessHandle }
+  }): { pid: number; killScope: 'posix-process-group' | 'win-taskkill-tree'; handle: ChildProcessHandle
+        osStartMarker: string | null; osStartMarkerSource: 'windows_creation_time' | 'posix_proc_stat_starttime' | 'posix_ps_lstart' | 'unavailable' }
 
   observe(handle: ChildProcessHandle | null, durable: {
     pid: number; processNonce: string; identitySidecarPath: string; teardownRequestedAt: string | null
+    osStartMarker: string | null; osStartMarkerSource: string
   }): Promise<ProcessLifecycleObservation>
 
   requestTermination(handle: ChildProcessHandle): Promise<{ verified: boolean }>
@@ -691,8 +833,14 @@ type ProcessLifecycleObservation =
   | { kind: 'still_running' }
   | { kind: 'self_exit'; exitCode: number | null; exitSignal: NodeJS.Signals | null }
   | { kind: 'confirmed_dead_unknown_cause' }             // handle lost across restart, no teardownRequestedAt, process no longer live
-  | { kind: 'identity_unverifiable' }                    // restart-recovered pid exists but sidecar/nonce cannot confirm it is the same process
+  | { kind: 'identity_unverifiable' }                    // restart-recovered pid exists but sidecar/nonce/OS-marker cannot confirm it is the same process instance (§4)
 ```
+
+`osStartMarker` is captured once, immediately after `spawn()` obtains a `pid`
+(§9.2 step 4), via the best available **local**-host mechanism (§4); it is
+`null`/`'unavailable'` when the host cannot supply one (§8.1, §12 window L13).
+It is corroborating only, exactly like `pid` — **never** identity by itself,
+and never a substitute for the sidecar/nonce match, only an addition to it.
 
 **Adapter (infrastructure, Execution-owned):** wraps `spawnProcess` /
 `signalProcessTree` / `admitProcessTreeKill` from
@@ -714,13 +862,28 @@ type ProcessLifecycleObservation =
    `process-tree-termination.ts` already implements, because the existing
    public API is `ChildProcess`-shaped only and there is no Node primitive to
    "re-attach" a `ChildProcess` object to an unrelated pid after a restart.
-   Before ever calling it, the adapter re-verifies identity: the process
-   identity sidecar must still exist, parse, and exactly equal the durable
-   `dispatch_process_binding` row (`correlationId`, `orcaRunId`,
-   `orcaDispatchId`, `processNonce`), **and** the target pid must currently
-   exist. Either check failing → `{ kind: 'identity_unverifiable' }` — **no
-   signal is ever sent**, and the adapter fails closed exactly like ORCA-S3's
-   identity check (§9.3).
+   Before ever calling it, the adapter re-verifies identity, and **all** of
+   the following must hold — sidecar/nonce/pid-exists alone is **not**
+   sufficient, because it cannot distinguish the original spawned process from
+   an unrelated process that later reused the same `pid` (§4):
+   1. the process identity sidecar must still exist, parse, and exactly equal
+      the durable `dispatch_process_binding` row (`correlationId`, `orcaRunId`,
+      `orcaDispatchId`, `processNonce`);
+   2. the target pid must currently exist;
+   3. **the target pid's current OS-observable process-instance discriminator
+      must be re-read from the OS (never from the sidecar or the DB — those
+      only hold the value captured at spawn time) and must exactly equal the
+      durably stored `os_start_marker` for this binding**, using the *same*
+      `os_start_marker_source` mechanism it was captured with.
+
+   Any of the three failing — sidecar missing/corrupt/mismatched, pid absent,
+   OS-marker unreadable, OS-marker disagreeing, or `os_start_marker_source =
+   'unavailable'` for this binding (§8.1, §12 window L13) — →
+   `{ kind: 'identity_unverifiable' }`. **No signal is ever sent.** This is the
+   fail-closed path that specifically covers **PID reuse**: process A exits,
+   the OS later reuses A's pid for an unrelated live process B, host restarts
+   — B's current OS-marker will not equal A's durably stored spawn-time
+   marker, so B is never signalled (§12 window L12).
 
 ### 9.2 Bind-time ordering (extends ORCA-S3 §7.6, DB ↔ filesystem ↔ process)
 
@@ -732,15 +895,24 @@ transaction, one seam:
 2. atomically write the worktree identity sidecar (ORCA-S3 step 2);
 3. **atomically write the process identity sidecar**
    `<durableShadowLifecycleRoot>/process/<orcaDispatchId>.json` = `{
-   correlationId, orcaRunId, orcaDispatchId, processNonce, spawnedAt: null }`
+   correlationId, orcaRunId, orcaDispatchId, processNonce, spawnedAt: null,
+   pid: null, osStartMarker: null, osStartMarkerSource: null }`
    — temp file + `rename`, **before** the process exists (§4 new);
 4. **spawn** the shadow lifecycle process (`spawnProcess`, `detached: true`) →
-   obtain `pid`; **rewrite** the sidecar's `spawnedAt` in place (same
-   temp+rename discipline) now that spawn succeeded (§4 new);
+   obtain `pid`; **read the OS-observable process-instance discriminator**
+   for that `pid` via the best available local mechanism (§4) → obtain
+   `osStartMarker` (`null` + `osStartMarkerSource: 'unavailable'` if the host
+   cannot supply one, §12 window L13); **rewrite** the sidecar's `spawnedAt`,
+   `pid`, `osStartMarker`, and `osStartMarkerSource` in place (same
+   temp+rename discipline) now that spawn succeeded — the sidecar carries the
+   `pid` and OS-marker fields specifically so the pre-commit orphan class
+   (§10.3) is identity-corroborable from the sidecar alone, with no
+   dependency on a committed DB row (§4 new);
 5. `BEGIN IMMEDIATE`;
 6. `INSERT run_binding` (ORCA-S1);
 7. `INSERT dispatch_worktree` (ORCA-S3);
-8. `INSERT dispatch_process_binding` (§4 new);
+8. `INSERT dispatch_process_binding` (with `os_start_marker` /
+   `os_start_marker_source`, §4 new);
 9. `COMMIT`.
 
 Steps 6–8 are **one** SQLite transaction. Both sidecars (steps 2 and 3/4) are
@@ -789,15 +961,20 @@ every `dispatch_process_binding` with no `dispatch_termination` yet:
   `{ kind: 'confirmed_dead_unknown_cause' }` →
   `INSERT dispatch_termination(termination_method='confirmed_dead_unknown_cause',
   exit_code=NULL, exit_signal=NULL, tree_verified=0)` (§8.2, §12 window L1).
-- **No live handle, process still live, identity sidecar + nonce confirm it**
-  → restart-recovered termination path (§9.1.2): re-verify, then the
-  pid-addressed sibling entry point, then record exactly as the live-handle
-  branch above.
-- **Identity cannot be confirmed** (sidecar missing/corrupt/mismatched, or a
-  live pid that the sidecar does not corroborate) →
-  `dispatch_lifecycle_incident(kind='process_identity_mismatch'` or
-  `'orphan_process_unverifiable')`, **blocked**, **no termination fact, no
-  signal ever sent** (§7 forbidden; §14 LIFE-2).
+- **No live handle, process still live, identity sidecar + nonce +
+  OS-observable process-instance discriminator all confirm it** →
+  restart-recovered termination path (§9.1.2): re-verify (all three checks,
+  §9.1), then the pid-addressed sibling entry point, then record exactly as
+  the live-handle branch above.
+- **Identity cannot be confirmed** — sidecar missing/corrupt/mismatched, a
+  live pid the sidecar does not corroborate, an unreadable/ambiguous
+  OS-observable process-instance discriminator, **or a live pid whose current
+  OS-marker disagrees with the durably stored spawn-time `os_start_marker`
+  (the PID-reuse case, §4, §12 window L12)** → `dispatch_lifecycle_incident(kind='process_identity_mismatch'`
+  or `'orphan_process_unverifiable')`, **blocked**, **no termination fact, no
+  signal ever sent** (§7 forbidden; §14 LIFE-2). This is the case that
+  concretely protects an unrelated process B that has reused process A's exited
+  pid: B is never touched.
 
 ## 10. Worktree finalization — governed reap
 
@@ -822,24 +999,35 @@ only when **all** of:
 
 `eligibility_digest = SHA-256(settlement_observation.status ‖
 worktree_provenance.status-or-'legacy' ‖ dispatch_termination.termination_method)`.
-Because every one of these three inputs is immutable once written (ORCA-S2
-§7.1 / ORCA-S3 §7.1 / S4 §8.2 all forbid mutation after Phase A), the digest
-**cannot legitimately change** once eligibility is first established — the
-`conflicted` transition (§10.2) exists only to catch a genuine implementation
-defect or an out-of-band data mutation, never an expected runtime path.
+**Correction:** `worktree_provenance.status` and `dispatch_termination.termination_method`
+are immutable once written (ORCA-S3 §7.1 / S4 §8.2), but
+`settlement_observation.status` is **not** unconditionally immutable —
+ORCA-S2's frozen contract permits exactly one further mutation,
+`'observed' → 'observed_conflicted'`, on **any** later Phase B sweep, with no
+promised quiescence point (§8.0.1). So the digest **can** legitimately change
+between §10.2 step 1 (intent recorded) and step 2 (re-verify) if that narrow
+window happens to straddle a genuine ORCA-S2 Phase B transition — the
+`conflicted` transition (§10.2) is a real, if narrow, runtime path, not only a
+defect signal. It is deliberately **not** the mechanism for the more likely
+case — a Phase B transition arriving *after* finalization and closure are both
+already complete — which §10.2's re-verify window has already closed by then;
+that later case is covered separately by Phase 5's post-closure reconciliation
+(§11, §14 LIFE-15), never by re-opening or re-verifying this digest.
 
 ### 10.2 Two-step act: intent, then filesystem, then result
 
 1. `BEGIN IMMEDIATE; INSERT worktree_finalization(status='intent_recorded',
    eligibility_digest, intent_recorded_at=now); COMMIT` — durable intent
    **before** any deletion.
-2. **Re-verify** the digest against current durable state (defensive; should
-   always match per §10.1). Mismatch → `UPDATE … SET status='conflicted',
+2. **Re-verify** the digest against current durable state (usually matches;
+   §10.1 corrected). Mismatch → `UPDATE … SET status='conflicted',
    conflicted_at=now`; **no deletion attempted**; surfaced as a
    `worktree_finalization_conflict` incident (this is the one path that DOES
-   raise an S4 incident from this table, because a genuine digest mismatch
-   here means an S2/S3 immutability invariant was violated elsewhere — a
-   signal worth blocking on, not silently retrying).
+   raise an S4 incident from this table — either a genuine ORCA-S2 Phase B
+   `observed → observed_conflicted` transition landed inside this narrow
+   intent-to-act window, or an S2/S3 immutability invariant was violated
+   elsewhere; either way it is a signal worth blocking on, not silently
+   retrying).
 3. On match: delete the durable shadow worktree directory
    (`rmSync(worktreeDir, { recursive: true, force: true })` — `force: true`
    makes "already gone" a success, not an error) **and** its ORCA-S3 identity
@@ -885,13 +1073,20 @@ neither gets a `correlation_id`-keyed durable fact; both are audit-logged only
   ORCA-S3's own ordering did not have, because S3 never spawns anything).
   Scan the durable shadow-lifecycle root's `process/` subtree for sidecars
   with **no** matching committed `dispatch_process_binding` row, older than
-  `orphanGraceMs`. For each: re-verify liveness + identity via the sidecar
-  (same discipline as §9.3's restart-recovered path); if live and verifiable,
-  terminate it through the same pid-addressed entry point; either way, delete
-  the orphan sidecar once the process is confirmed gone. **Identity-unverifiable
-  → skip, log, do not touch** — fail closed exactly as §9.3 requires; an
-  orphan sweep is not exempt from the identity discipline the main sweep
-  observes.
+  `orphanGraceMs`. **The sidecar alone — never a committed DB row — is the
+  identity source for this class** (§8.1, §9.2 step 4): it carries `pid`,
+  `processNonce`, and the OS-observable process-instance discriminator
+  (`osStartMarker` / `osStartMarkerSource`) captured at spawn time, which is
+  exactly what locating and corroborating a pre-commit orphan requires. For
+  each: re-verify liveness + identity **against the sidecar's own `pid` and
+  OS-marker** (the full three-part discipline of §9.1's restart-recovered
+  path — sidecar/nonce match, pid-exists, and OS-marker match — **the same
+  PID-reuse protection applies here before any orphan signal**); if live and
+  verifiable, terminate it through the same pid-addressed entry point; either
+  way, delete the orphan sidecar once the process is confirmed gone.
+  **Identity-unverifiable → skip, log, do not touch** — fail closed exactly as
+  §9.3 requires; an orphan sweep is not exempt from the identity discipline the
+  main sweep observes.
 
 Both classes are logged in the `DelegationBoundaryLifecycleReport`'s
 `orphanReapAudit` list (`{ kind, path-or-pid-fingerprint (never a raw absolute
@@ -904,7 +1099,7 @@ committed.
 `convergeDelegationBoundaryLifecycle(sliceRef, now)` is invoked by the
 composition boundary **after** `convergeWorktreeProvenance(...)` (ORCA-S3)
 returns. It reads `run_binding` + `settlement_observation` +
-`worktree_provenance` + `dispatch_worktree` + the four S4 tables, and performs
+`worktree_provenance` + `dispatch_worktree` + all six S4 tables, and performs
 the real side effects of §9/§10. **Never** a phase inside ORCA-S2 or ORCA-S3's
 own coordinators.
 
@@ -925,13 +1120,34 @@ with no `dispatch_termination` and no open `process_identity_mismatch` /
 `dispatch_lifecycle_event` row of `event_kind='shadow_delegated_boundary_closed'`,
 `INSERT` it (composite-PK idempotent).
 
+**Phase 5 — Reconcile post-closure contradictions** (new; §8.0.1, §14 LIFE-15):
+for **every** existing `dispatch_lifecycle_closure` row with
+`post_closure_settlement_conflict_detected_at IS NULL` — regardless of how
+long ago it closed, and independent of Phases 1–4's progress for any other
+binding — re-read the **current** `settlement_observation.status` for that
+`correlation_id` and compare it to the closure's frozen `settlement_status_ref`.
+If they still agree: no-op. If they disagree (the only legitimate cause is a
+later ORCA-S2 Phase B `observed → observed_conflicted` transition, §8.0.1):
+`UPDATE dispatch_lifecycle_closure SET post_closure_settlement_conflict_detected_at = now`
+(the one permitted mutation, §7) and `INSERT
+dispatch_lifecycle_incident(kind='post_closure_settlement_conflict', blocked=1)`
+whose `detail_json` records both the frozen `settlement_status_ref` and the
+newly observed current status — **never** rewriting, replacing, or
+re-deriving the closure or its event row. This phase runs on **every** sweep
+pass for the lifetime of the closure, because ORCA-S2 never promises a
+quiescence point after which the check could stop.
+
 **Prospective skip**: a `run_binding` with a `settlement_observation` and a
 terminal `worktree_provenance` state but no `dispatch_process_binding` and no
 S4 fact that ever existed → `LEGACY_BINDING_NOT_LIFECYCLE_MANAGED` (§8.7),
 reported only.
 
-**Fixed-point property (LIFE-fixed-point):** running Phases 1–4 N times on
-unchanged durable state ≡ running them once. A retryable result
+**Fixed-point property (LIFE-fixed-point):** running Phases 1–5 N times on
+unchanged durable state ≡ running them once — this includes Phase 5, whose
+one permitted mutation is itself idempotent (`UPDATE … WHERE
+post_closure_settlement_conflict_detected_at IS NULL` is a no-op once set) and
+whose incident insert is the same UNIQUE-index-backed no-op-on-retry as every
+other S4 incident (§8.4). A retryable result
 (`LIFECYCLE_STORE_BUSY_RETRYABLE`, `LIFECYCLE_FS_OPERATIONAL_RETRYABLE`,
 `LIFECYCLE_PROCESS_OPERATIONAL_RETRYABLE`) writes **nothing** durable and
 performs **no** real side effect, leaving the binding for the next pass. This
@@ -943,9 +1159,11 @@ sweep-loop state (§12 window L11).
 ## 12. Crash / restart window table
 
 **SQLite, filesystem, and OS process state are three independently-crashable
-media; nothing commits them atomically together.** Windows are lettered `L1`–`L11`
-to avoid collision with ORCA-S3's `A`–`G` (unchanged, unaffected — S4 adds no
-interaction with S3's own steps).
+media; nothing commits them atomically together.** Windows are lettered `L1`–`L13`
+(crash/restart) plus `L14` (§12.1 — a legitimate async state change, not a
+crash) to avoid collision with ORCA-S3's `A`–`G` (unchanged, unaffected — S4
+adds no interaction with S3's own steps). `L12` and `L13` and the §12.1 window
+are additions made by this correction (review findings B1/B2).
 
 | # | Crash / classification point | Durable DB state | Process / filesystem state | S4 behaviour |
 | --- | --- | --- | --- | --- |
@@ -958,8 +1176,20 @@ interaction with S3's own steps).
 | **L7** | host crashes between §9.2 step 3/4 (process identity sidecar written, process spawned) and step 9 (`COMMIT`) | no `run_binding`, no `dispatch_worktree`, no `dispatch_process_binding` | orphan **live or dead** process + orphan process identity sidecar | `reconcileOrphanShadowState` (§10.3) discovers it via the sidecar (past the grace period), re-verifies identity/liveness, terminates if live and verifiable, deletes the sidecar. **Not** classified as corruption; not a fabricated DB row. |
 | **L8** | two sweep passes (a retried pass and a fresh one) both reach Phase 2 for the **same** `correlation_id` | `worktree_finalization` PK forbids a second `INSERT`; the second pass's insert attempt is a no-op | — | Duplicate finalization request is a no-op, not a double-delete, not an error (§14 LIFE-7). |
 | **L9** | a duplicate callback/hook (e.g. a future `onChildTerminated`-style wake-up) fires twice for the same process exit | `dispatch_termination` PK forbids a second `INSERT`; `dispatch_lifecycle_event` composite PK forbids a second row | — | The hook is a **wake-up hint only, never a correctness source** (mirrors ORCA-S2 Appendix C's `onDispatchSettled` framing) — the sweep's own durable-state re-verification is authoritative regardless of how many times any callback fires (§14 LIFE-8). |
-| **L10** | an S4 write-transaction cannot acquire the SQLite write lock within the bounded busy-retry budget, or a projection rebuild is in progress against the three PROJECTION tables | no partial state | — | `LIFECYCLE_STORE_BUSY_RETRYABLE` — no durable row, no incident, not blocked, surfaced in the report, retried next sweep (mirrors ORCA-S2 §16.1 / ORCA-S3 gate 17 exactly). |
+| **L10** | an S4 write-transaction cannot acquire the SQLite write lock within the bounded busy-retry budget, or a projection rebuild is in progress against the one PROJECTION table (`dispatch_lifecycle_incident`) | no partial state | — | `LIFECYCLE_STORE_BUSY_RETRYABLE` — no durable row, no incident, not blocked, surfaced in the report, retried next sweep (mirrors ORCA-S2 §16.1 / ORCA-S3 gate 17 exactly). |
 | **L11** | host restarts mid-batch, with some bindings in the same sweep call already advanced through Phase 4 and others still at Phase 1 | mixed, per-binding | mixed, per-binding | Every phase's precondition is a durable fact (§11 fixed-point property) — the next sweep resumes each binding independently from wherever its own durable state left it; no binding is re-processed past its already-committed terminal fact, no binding is skipped. |
+| **L12** (new) | process A (bound to a `dispatch_process_binding` row) exits; before restart-recovery re-verification runs, the OS reuses A's now-free `pid` for an unrelated, live process B; host restarts | `dispatch_process_binding.pid` durably equals B's current pid (coincidental reuse); `os_start_marker` durably holds **A's** spawn-time marker | B is a real, unrelated, live process | Restart-recovered re-verification (§9.1.2) re-reads B's **current** OS-observable process-instance discriminator and compares it to A's durably stored `os_start_marker` — they disagree → `{ kind: 'identity_unverifiable' }`. **No signal is ever sent to B.** `dispatch_lifecycle_incident(kind='orphan_process_unverifiable')`; blocked; no termination fact fabricated for A. Sidecar-plus-pid-exists alone (pre-correction) would have wrongly treated B as A; this is the concrete scenario this correction closes. |
+| **L13** (new) | the host cannot supply an OS-observable process-instance discriminator at spawn time (§9.1's capture fails or the capability is absent) | `dispatch_process_binding.os_start_marker = NULL`, `os_start_marker_source = 'unavailable'` | process spawned normally | The same-process-instance live-handle path (§9.1.1) is unaffected — a live `ChildProcess` handle does not depend on the OS marker. But **any** restart-recovered corroboration attempt for this binding is unconditionally `identity_unverifiable` (no durable baseline exists to compare against) — an accepted, honestly-reported limitation, never a fabricated pass. |
+
+### 12.1 Late upstream contradiction window (not a crash — a legitimate async state change)
+
+This window is not a crash/restart scenario; it can occur on a perfectly
+healthy, continuously-running host, and is included here because it is the
+direct correction for review finding B1.
+
+| # | Trigger point | Durable state before | Durable state after | S4 behaviour |
+| --- | --- | --- | --- | --- |
+| **L14** (new) | S4 writes `dispatch_lifecycle_closure` (and `dispatch_lifecycle_event`) for a binding while `settlement_observation.status = 'observed'`; **later**, an independent ORCA-S2 Phase B sweep legitimately transitions that same binding's `settlement_observation.status: 'observed' → 'observed_conflicted'` (permitted by S2's own frozen contract, with no quiescence point, §8.0.1) | `dispatch_lifecycle_closure.settlement_status_ref = 'observed'`, `post_closure_settlement_conflict_detected_at = NULL` | `settlement_observation.status = 'observed_conflicted'`; the closure/event rows are byte-for-byte unchanged (SOURCE, §8.5/§8.6) | The **next** `convergeDelegationBoundaryLifecycle` sweep's Phase 5 (§11) deterministically detects the divergence, sets `post_closure_settlement_conflict_detected_at` (the one permitted mutation), and raises a blocking `dispatch_lifecycle_incident(kind='post_closure_settlement_conflict')`. The closure/event rows are **never** rewritten or replaced; `settlement_status_ref` remains the honest historical record of what was true at closure time; any future `ORCA_DELEGATED` projection consumer must treat this `correlation_id` as blocked-from-copy until the incident is resolved (§7, §18, §14 LIFE-15). This is Gate 23's acceptance scenario (§16). |
 
 ## 13. Failure semantics
 
@@ -971,6 +1201,9 @@ interaction with S3's own steps).
 | `run_binding` predates S4 composition, no S4 fact ever existed | `LEGACY_BINDING_NOT_LIFECYCLE_MANAGED` — no row, no incident, no block, no retroactive spawn (§8.7). |
 | Process identity cannot be confirmed (sidecar absent/corrupt/mismatched) | `dispatch_lifecycle_incident(kind='process_identity_mismatch')`; blocked; **no termination fact, no signal**. |
 | Restart-recovered pid exists but the sidecar cannot corroborate it | `dispatch_lifecycle_incident(kind='orphan_process_unverifiable')`; blocked; **no signal sent**. |
+| Restart-recovered pid exists, sidecar/nonce match, but the pid's **current** OS-observable process-instance discriminator disagrees with, or is unreadable relative to, the durably stored `os_start_marker` (§4, §12 window L12) — covers PID reuse by an unrelated process | `dispatch_lifecycle_incident(kind='orphan_process_unverifiable')`; blocked; **no signal ever sent to the pid-reusing process**. |
+| Binding's `os_start_marker_source = 'unavailable'` (§12 window L13) and a restart-recovery corroboration is attempted | Always `identity_unverifiable` — no baseline exists; **no signal sent**, no fabricated pass. |
+| A `dispatch_lifecycle_closure` row's frozen `settlement_status_ref` no longer equals current `settlement_observation.status` (a later, legitimate ORCA-S2 Phase B transition, §8.0.1, §12 window L14) | Phase 5 (§11): set `post_closure_settlement_conflict_detected_at` (the one permitted closure mutation); `dispatch_lifecycle_incident(kind='post_closure_settlement_conflict')`, blocked; closure/event rows preserved byte-for-byte; future projection/copy of this closure blocked (§18). |
 | Transient error querying/signalling a process (not an identity question) | `LIFECYCLE_PROCESS_OPERATIONAL_RETRYABLE` — no row, no incident, not blocked, retried next sweep. |
 | Transient filesystem error during finalization (lock/EBUSY/EPERM) | `LIFECYCLE_FS_OPERATIONAL_RETRYABLE` — no row mutation beyond `intent_recorded` (already durable), no incident, retried. |
 | Finalization eligibility digest mismatch on re-verify | `worktree_finalization.status → 'conflicted'`; `dispatch_lifecycle_incident(kind='worktree_finalization_conflict')`; **no deletion attempted**. |
@@ -986,19 +1219,28 @@ interaction with S3's own steps).
   incident-only or retryable-only — **never** a synthesized exit code, a
   synthesized finalization outcome, or a synthesized closure.
 - **LIFE-2 — fail-closed identity, no bare-pid kill.** No process is ever
-  signalled by pid alone. Every signal — live-handle or restart-recovered — is
-  preceded by a durable identity match against the process identity sidecar.
-  Identity uncertainty is **always** an incident or a skip, never a guess.
+  signalled by pid alone, and no process is ever signalled on sidecar/nonce
+  agreement alone either. Every **restart-recovered** signal is preceded by
+  **all three** of: a durable sidecar/nonce match, pid-exists, **and** an
+  OS-observable process-instance discriminator re-read from the OS and
+  compared exactly against the durably stored spawn-time value (§4, §9.1) —
+  the corroborator that specifically distinguishes the original spawned
+  process from an unrelated process that later reuses the same pid.
+  Same-process-instance live-handle signals (§9.1.1) do not need the OS-marker
+  check, because a live `ChildProcess` handle cannot be confused with an
+  unrelated process. Identity uncertainty — including OS-marker disagreement,
+  unreadability, or unavailability — is **always** an incident or a skip,
+  never a guess.
 - **LIFE-3 — no premature or unconfined deletion.** `worktree_finalization`'s
   filesystem act runs only after `status='intent_recorded'` is durably
   committed, and only against a path `isInside` the configured durable
   shadow-worktree root. Orphan reap (§10.3) is bounded by `orphanGraceMs` and
   the same confinement guard.
 - **LIFE-4 — SOURCE facts are never rebuilt.**
-  `dispatch_process_binding` / `dispatch_termination` / `worktree_finalization`
-  are excluded from every projection-rebuild DROP list (§8.8). Only
-  `dispatch_lifecycle_incident` / `dispatch_lifecycle_closure` /
-  `dispatch_lifecycle_event` are ever dropped and regenerated.
+  `dispatch_process_binding` / `dispatch_termination` / `worktree_finalization` /
+  `dispatch_lifecycle_closure` / `dispatch_lifecycle_event` are excluded from
+  every projection-rebuild DROP list (§8.8). Only `dispatch_lifecycle_incident`
+  is ever dropped and regenerated.
 - **LIFE-5 — closure copies, never re-decides.** `dispatch_lifecycle_closure`'s
   `*_ref` columns are verbatim copies of already-decided statuses. S4 never
   reinterprets what an ORCA-S2 settlement outcome or an ORCA-S3 provenance
@@ -1042,6 +1284,17 @@ interaction with S3's own steps).
   process or a real user worktree.
 - **LIFE-14 — no stage advance.** No transition in `AICONTROL_NATIVE →
   ORCA_SHADOW → ORCA_DELEGATED → ORCA_AUTHORITATIVE` occurs.
+- **LIFE-15 — closure is frozen; late upstream contradiction is surfaced, never
+  concealed or rewritten.** `dispatch_lifecycle_closure` and
+  `dispatch_lifecycle_event` are SOURCE (§8.0.1) and, once written, are never
+  rewritten, replaced, or silently re-derived from current upstream state — not
+  even after a later, legitimate ORCA-S2 `observed → observed_conflicted`
+  Phase B transition for the same `correlation_id`. Every sweep's Phase 5
+  (§11) deterministically re-checks every existing closure against current
+  `settlement_observation.status` and, on divergence, sets the one permitted
+  `post_closure_settlement_conflict_detected_at` mutation and raises a
+  blocking incident (§12 window L14, §16 gate 23). A closure carrying that
+  marker is never eligible for a future `ORCA_DELEGATED` projection/copy (§18).
 
 ## 15. Out of scope (explicit)
 
@@ -1081,13 +1334,14 @@ interaction with S3's own steps).
    `reconcile-shadow-execution-state.ts`, `converge-worktree-provenance*.ts`,
    `orca-execution-plane.ts`, and `native-results-authoritative-executor.ts`
    byte-unchanged.
-3. **Genuine RED-before-GREEN** — for LIFE-1..14 and each §12 window (L1–L11),
-   a failing test captured **before** the behaviour it checks. Evidence:
-   `slices/delegated-side-effect-boundary/RED-EVIDENCE.md`.
+3. **Genuine RED-before-GREEN** — for LIFE-1..15 and each §12/§12.1 window
+   (L1–L14), a failing test captured **before** the behaviour it checks.
+   Evidence: `slices/delegated-side-effect-boundary/RED-EVIDENCE.md`.
 4. **Durable lifecycle SOURCE facts** — a test asserts `dispatch_process_binding`,
-   `dispatch_termination`, and `worktree_finalization` survive a projection
-   rebuild untouched (§8.8), and that only the three PROJECTION tables are
-   ever dropped by it.
+   `dispatch_termination`, `worktree_finalization`, `dispatch_lifecycle_closure`,
+   and `dispatch_lifecycle_event` all survive a projection rebuild
+   **byte-for-byte untouched** (§8.8), and that **only**
+   `dispatch_lifecycle_incident` is ever dropped and regenerated by it.
 5. **Terminal-fact immutability** — `dispatch_termination` accepts no
    post-insert mutation of any column, under a direct write attempt and under
    a duplicate-observation race.
@@ -1098,15 +1352,24 @@ interaction with S3's own steps).
 7. **Process identity safety** — no signal is ever sent without a prior,
    sidecar-verified identity match, on both the live-handle and
    restart-recovered paths; a mismatched or corrupt sidecar always incidents,
-   never fabricates a kill.
+   never fabricates a kill. **On the restart-recovered path specifically**: no
+   signal is ever sent without *also* an OS-observable process-instance
+   discriminator match (§4, §9.1); seed a scenario where a `pid` recorded in
+   `dispatch_process_binding` is reassigned to a genuinely unrelated live
+   process before restart-recovery runs, and prove that unrelated process is
+   never signalled (`identity_unverifiable`, blocked, §12 window L12).
 8. **Idempotent replay** — the sweep run ×3 back-to-back, and again after a
    projection rebuild, produces a semantically-equivalent closed set: zero
    duplicate rows, zero extra incidents, zero duplicate real side effects
    (LIFE-fixed-point, §11).
-9. **Crash/restart windows (§12 L1–L11)** — a separate-child-process harness
+9. **Crash/restart windows (§12 L1–L13)** — a separate-child-process harness
    (mirrors ORCA-S1/S2/S3's own pattern) proves each window's documented
    recovery behaviour, including that L3/L4/L5 converge on one shared
-   recovery path and that L1 never fabricates an exit code or signal.
+   recovery path, that L1 never fabricates an exit code or signal, that L12
+   never signals a pid-reusing unrelated process, and that L13 always routes a
+   marker-less binding's restart-recovered corroboration to
+   `identity_unverifiable`. **Late upstream contradiction (§12.1 L14)** is
+   separately proven by gate 23.
 10. **Orphan reconciliation** — seed both orphan classes (§10.3: an
     ORCA-S3-window orphan worktree with no `dispatch_worktree` row; an
     S4-window orphan process with no `dispatch_process_binding` row), each
@@ -1159,6 +1422,25 @@ interaction with S3's own steps).
 22. **Scoped-deletion audit** — a test enumerates every filesystem path S4 ever
     deletes across a full acceptance run and asserts each one resolves inside
     an Execution-owned durable shadow root; none resolves to a real user path.
+23. **Late post-closure contradiction, deterministically detected and blocked**
+    (§8.0.1, §11 Phase 5, §12 window L14, LIFE-15) — the exact scenario B1
+    requires: (1) S4 closes a binding while `settlement_observation.status =
+    'observed'`; (2) `dispatch_lifecycle_closure` and `dispatch_lifecycle_event`
+    are durably written; (3) a later ORCA-S2 Phase B sweep legitimately
+    transitions that binding's status to `'observed_conflicted'`; (4) assert
+    the closure and event rows are byte-for-byte unchanged; (5) the next
+    `convergeDelegationBoundaryLifecycle` sweep's Phase 5 deterministically
+    sets `post_closure_settlement_conflict_detected_at` and raises a blocking
+    `dispatch_lifecycle_incident(kind='post_closure_settlement_conflict')`;
+    (6) assert any (test-only) future delegation/projection consumer that
+    checks this marker refuses to copy the closure while it is set.
+24. **PID-reuse corroboration** (§4, §9.1, §12 window L12) — spawn a shadow
+    lifecycle process, let it exit, restart the composition root, and (in a
+    controlled test harness) arrange for the exited pid to be occupied by a
+    genuinely unrelated live process before restart-recovery runs; assert the
+    OS-observable process-instance discriminator disagrees, the unrelated
+    process is never signalled, `dispatch_lifecycle_incident(kind='orphan_process_unverifiable')`
+    is raised, and the binding is blocked, not silently resolved.
 
 ## 17. Rollback
 
@@ -1166,14 +1448,15 @@ Advisory + additive. To roll back: stop the composition boundary from invoking
 `convergeDelegationBoundaryLifecycle` and `reconcileOrphanShadowState`; revert
 the bind-time seam extension in `shadow-observation-service.ts` (S4's three
 added steps + one insert) back to the ORCA-S3-only ordering; drop **only** the
-three PROJECTION tables (`dispatch_lifecycle_incident`,
-`dispatch_lifecycle_closure`, `dispatch_lifecycle_event`), or leave them —
-inert.
+one PROJECTION table (`dispatch_lifecycle_incident`), or leave it — inert.
 
 - **`dispatch_process_binding`, `dispatch_termination`, `worktree_finalization`,
-  and the process identity sidecars are SOURCE state — NEVER deleted by
-  rollback.** They may be retained as evidence and removed only by an explicit
-  later governed procedure.
+  `dispatch_lifecycle_closure`, `dispatch_lifecycle_event`, and the process
+  identity sidecars are all SOURCE state — NEVER deleted by rollback**
+  (§8.0, §8.0.1). They may be retained as evidence and removed only by an
+  explicit later governed procedure. A closure carrying
+  `post_closure_settlement_conflict_detected_at` is retained exactly as-is —
+  rollback is not an occasion to resolve, hide, or reinterpret that marker.
 - Any shadow lifecycle process still alive at rollback time should be torn
   down once, by the same identity-verified path (§9.3), as part of the
   rollback procedure itself — rollback is not a license to leave a live
@@ -1193,10 +1476,20 @@ own frozen SPEC and its own independent acceptance:
 - **Production process-handle acquisition** — added as a **hard prerequisite**
   by this SPEC (§5): Slice B must define and prove, under its own contract,
   how Orca acquires a real delegated workload's process/process-tree handle,
-  because this slice explicitly does not.
+  because this slice explicitly does not. **For any delegated dispatch that
+  may execute on a remote host, this prerequisite explicitly includes defining
+  an identity/verdict model compatible with remote execution (e.g. SSH,
+  `docs/reference/ssh-execution-boundary.md`) — local PID-existence-plus-signal
+  semantics, and this slice's local OS-observable process-instance
+  discriminator (§4, §9.1), do not transfer to a remote execution host and
+  establish no remote parity** (§5.1).
 - **The terminal-projection path into `data/app.db`** (§G item 6) — must
   **copy, never re-decide**, exactly the discipline `dispatch_lifecycle_closure`
-  already models one level advisory (§8.5, LIFE-5).
+  already models one level advisory (§8.5, LIFE-5), **and must refuse to copy
+  any closure whose `post_closure_settlement_conflict_detected_at` is set**
+  (§7, §11 Phase 5, §14 LIFE-15) until the contradiction is resolved — a
+  contradicted shadow-side closure must never silently become authoritative
+  truth in `data/app.db`.
 - **Real (non-`MockExecutor`) executor parity** — orthogonal; may proceed in
   parallel or not at all before cutover (gap analysis §6.2).
 - **A real terminal-event emitter** — this slice proves only the idempotency
@@ -1248,6 +1541,11 @@ carried forward to Slice B per §18 above), and the mandatory process-handle
 provenance framing (§7 caveat about the unvendored external amendment,
 preserved verbatim in this SPEC's header).
 
+**From `docs/reference/ssh-execution-boundary.md`:** the fixed `live` /
+`unverifiable` / `exited` vocabulary and the "no asserting what you cannot
+observe" discipline, cited (never re-derived) to bound §5.1's remote-execution
+boundary statement.
+
 **Explicitly NOT consumed:** `parity_observation` / `parity.ts` (no parity
 work, mirrors ORCA-S3 B5); `settlement_incident` / `worktree_provenance_incident`
 (S4 has its own channel); `reconcile-shadow-execution-state.ts` /
@@ -1276,10 +1574,11 @@ work, mirrors ORCA-S3 B5); `settlement_incident` / `worktree_provenance_incident
    'confirmed_dead_unknown_cause'`? Is `teardown_requested_at` genuinely
    written *before* every signal, never after or never at all?
 7. **SOURCE vs PROJECTION discipline (§8.8)** — does a projection rebuild ever
-   drop `dispatch_process_binding`, `dispatch_termination`, or
-   `worktree_finalization`? Does regenerating the three PROJECTION tables from
-   unchanged SOURCE state reproduce byte-for-byte-equivalent rows (excluding
-   local metadata)?
+   drop `dispatch_process_binding`, `dispatch_termination`,
+   `worktree_finalization`, `dispatch_lifecycle_closure`, or
+   `dispatch_lifecycle_event`? Does regenerating the one PROJECTION table
+   (`dispatch_lifecycle_incident`) from unchanged SOURCE state reproduce a
+   byte-for-byte-equivalent row (excluding local metadata)?
 8. **No "phase 3.5"** — is `converge-worktree-provenance*.ts` byte-unchanged?
    Is `convergeDelegationBoundaryLifecycle` invoked strictly **after**
    `convergeWorktreeProvenance(...)` and never from inside it?
@@ -1308,6 +1607,25 @@ work, mirrors ORCA-S3 B5); `settlement_incident` / `worktree_provenance_incident
     byte-unchanged and green despite the extended bind-time seam; ORCA-S2/S3
     convergence and re-verification still run for every binding regardless of
     S4 state; no separate unconditional pass introduced anywhere.
+16. **Late-conflict honesty (§8.0.1, LIFE-15)** — does anything ever rewrite,
+    replace, or silently re-derive `dispatch_lifecycle_closure` or
+    `dispatch_lifecycle_event` after a later ORCA-S2 `observed →
+    observed_conflicted` transition? Does Phase 5 run on **every** sweep
+    (never just once) against **every** existing closure, not only newly
+    eligible bindings? Is `settlement_status_ref` ever treated as current
+    truth once `post_closure_settlement_conflict_detected_at` is set?
+17. **PID-reuse corroboration (§4, §9.1, §12 window L12)** — is the
+    OS-observable process-instance discriminator genuinely re-read from the OS
+    (never trusted from the sidecar or the DB) and compared exactly, on
+    **every** restart-recovered signal attempt, before the sidecar/nonce/pid
+    check is treated as sufficient? Can any code path reach
+    `requestTermination` on the restart-recovered path without that
+    comparison having passed?
+18. **No claimed remote parity (§5.1)** — does any test, report, or doc
+    comment introduced by this slice claim that its local synthetic identity
+    proof (pid, sidecar, OS-observable process-instance discriminator)
+    establishes anything about a real delegated workload on a remote (e.g.
+    SSH) execution host?
 
 ---
 

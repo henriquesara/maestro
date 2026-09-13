@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -20,7 +20,7 @@ import {
   fixtureSettlementObservation,
   fixtureWorktreeProvenance
 } from '../slices/delegated-side-effect-boundary/delegated-side-effect-boundary-test-harness'
-import { convergeDelegationBoundaryLifecycle } from './converge-delegation-boundary-lifecycle'
+import { convergeDelegationBoundaryLifecycle, type ProcessLifecycleObservationLike } from './converge-delegation-boundary-lifecycle'
 
 // ORCA-S4 SPEC §8.0.1, §11 Phase 5, §12 window L14, §14 LIFE-15, gate 23 — the
 // exact scenario review finding B1 requires. RED:
@@ -56,7 +56,7 @@ const fakePort = {
   spawn: () => {
     throw new Error('not exercised')
   },
-  observe: async () => ({ kind: 'self_exit', exitCode: 0, exitSignal: null }),
+  observe: async (): Promise<ProcessLifecycleObservationLike> => ({ kind: 'self_exit', exitCode: 0, exitSignal: null }),
   requestTermination: async () => ({ verified: true }),
   requestTerminationByPid: async () => ({ verified: true })
 }

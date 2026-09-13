@@ -68,6 +68,70 @@ export function signalProcessTree(child: ChildProcess, signal?: NodeJS.Signals):
   }
 }
 
+/**
+ * Pid-addressed sibling of `signalProcessTree`, for a restart-recovered caller
+ * that holds no live `ChildProcess` handle — there is no Node primitive to
+ * re-attach a `ChildProcess` object to an unrelated pid after a host restart
+ * (ORCA-S4 SPEC §9.1.2). Same gate, same platform branches; the only
+ * difference is there is no handle left to fall back to on a refusal, so a
+ * refused/failed kill here reports `false` with no root-kill fallback.
+ *
+ * The caller MUST have already independently re-verified process identity
+ * (sidecar/nonce, pid-exists, OS-observable process-instance discriminator,
+ * and — on macOS — the compound argv/nonce proof) before ever calling this.
+ * This function performs no identity check itself, exactly like
+ * `signalProcessTree` performs none for the handle it is given.
+ */
+export function signalProcessTreeByPid(
+  pid: number,
+  killScope: 'posix-process-group' | 'win-taskkill-tree',
+  signal?: NodeJS.Signals
+): Promise<boolean> {
+  if (killScope === 'win-taskkill-tree') {
+    if (!admitProcessTreeKill({ pid, site: 'restart-recovered-process-tree', scope: 'win-taskkill-tree' })) {
+      return Promise.resolve(false)
+    }
+    return new Promise((resolve) => {
+      let killer: ChildProcess
+      try {
+        killer = nodeSpawn('taskkill', ['/pid', String(pid), '/t', '/f'], {
+          stdio: 'ignore',
+          windowsHide: true,
+          shell: false
+        })
+      } catch {
+        resolve(false)
+        return
+      }
+      let settled = false
+      const finish = (ok: boolean): void => {
+        if (settled) {
+          return
+        }
+        settled = true
+        clearTimeout(timer)
+        resolve(ok)
+      }
+      killer.once('error', () => finish(false))
+      killer.once('close', (code) => finish(code === 0))
+      const timer = setTimeout(() => {
+        killer.kill()
+        finish(false)
+      }, SUBPROCESS_TIMEOUT_MS)
+      timer.unref?.()
+    })
+  }
+  if (!admitProcessTreeKill({ pid, site: 'restart-recovered-process-tree', scope: 'posix-process-group' })) {
+    return Promise.resolve(false)
+  }
+  try {
+    process.kill(-pid, signal)
+    return Promise.resolve(true)
+  } catch {
+    return Promise.resolve(!processGroupExists(pid))
+  }
+}
+
 export async function forceTerminateProcessTree(child: ChildProcess): Promise<boolean> {
   const signaled = await signalProcessTree(child, 'SIGKILL')
   if (!signaled) {

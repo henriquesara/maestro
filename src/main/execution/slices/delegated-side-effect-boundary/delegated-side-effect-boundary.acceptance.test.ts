@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -16,7 +16,7 @@ import { SqliteSettlementObservationStore } from '../../infrastructure/sqlite-se
 import { SqliteWorktreeFinalizationStore } from '../../infrastructure/sqlite-worktree-finalization-store'
 import { SqliteWorktreeProvenanceIncidentStore } from '../../infrastructure/sqlite-worktree-provenance-incident-store'
 import { SqliteWorktreeProvenanceStore } from '../../infrastructure/sqlite-worktree-provenance-store'
-import { convergeDelegationBoundaryLifecycle } from '../../application/converge-delegation-boundary-lifecycle'
+import { convergeDelegationBoundaryLifecycle, type ProcessLifecycleObservationLike } from '../../application/converge-delegation-boundary-lifecycle'
 import { writeFixtureAppDb } from '../shadow-identity-observation/shadow-observation.test-support'
 import { fixtureBinding, fixtureSettlementObservation, fixtureWorktreeProvenance } from './delegated-side-effect-boundary-test-harness'
 
@@ -53,7 +53,7 @@ const fakePort = {
   spawn: () => {
     throw new Error('not exercised')
   },
-  observe: async () => ({ kind: 'self_exit', exitCode: 0, exitSignal: null }),
+  observe: async (): Promise<ProcessLifecycleObservationLike> => ({ kind: 'self_exit', exitCode: 0, exitSignal: null }),
   requestTermination: async () => ({ verified: true }),
   requestTerminationByPid: async () => ({ verified: true })
 }
@@ -203,9 +203,20 @@ describe('ORCA-S4 acceptance — gate 4: SOURCE vs PROJECTION rebuild discipline
 })
 
 describe('ORCA-S4 acceptance — gate 21: synthetic-process labeling in the EVIDENCE REPORT ITSELF (§5, no production parity claims)', () => {
+  const labelDirs: string[] = []
+  afterEach(() => {
+    while (labelDirs.length) {
+      try {
+        rmSync(labelDirs.pop()!, { recursive: true, force: true, maxRetries: 3 })
+      } catch {
+        /* best-effort */
+      }
+    }
+  })
+
   it('the DelegationBoundaryLifecycleReport carries an explicit synthetic/self-spawned label and a non-parity disclaimer — not just SPEC prose', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'orca-s4-acc-label-'))
-    dirs.push(dir)
+    labelDirs.push(dir)
     const s = setup(dir)
     const report = await convergeDelegationBoundaryLifecycle(
       { ...s, processPort: fakePort, liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, now: () => '2026-09-13T00:00:00Z', newId: (p: string) => `${p}_1` },
@@ -223,10 +234,11 @@ describe('ORCA-S4 acceptance — gate 21: synthetic-process labeling in the EVID
 
 describe('ORCA-S4 acceptance — §20 attack surface #18: no claimed remote/SSH parity (§5.1)', () => {
   it('no test file in this slice claims the local identity proof establishes remote/SSH execution parity (guard — must stay true as GREEN lands)', () => {
-    const { readdirSync } = require('node:fs') as typeof import('node:fs')
     const s4Dir = __dirname
     for (const name of readdirSync(s4Dir)) {
-      if (!name.endsWith('.test.ts')) continue
+      if (!name.endsWith('.test.ts')) {
+        continue
+      }
       const src = readFileSync(join(s4Dir, name), 'utf8')
       expect(src, `${name} must not claim remote/SSH parity`).not.toMatch(/proves? remote (execution )?parity/i)
       expect(src, `${name} must not claim SSH identity is established`).not.toMatch(/establishes? SSH identity/i)

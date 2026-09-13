@@ -90,7 +90,7 @@ export function fixtureWorktreeProvenance(over: Record<string, unknown> = {}) {
     baseCommit: 'base000',
     candidateHead: 'head000',
     filesChangedJson: '[]',
-    provenanceSource: 'git_diff',
+    provenanceSource: 'synchronous_capture' as const,
     worktreePathRef: 'unused',
     provenanceDigest: 'y'.repeat(64),
     provenanceJson: '{}',

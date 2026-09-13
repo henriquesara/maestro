@@ -5,11 +5,13 @@ import SyncDatabase from '../../../sqlite/sync-database'
 import { OrchestrationDb } from '../../../runtime/orchestration/db'
 import {
   runShadowObservation,
+  type DelegationBoundaryDeps,
   type ShadowObservationReport,
   type ShadowSampleSlot
 } from '../../application/shadow-observation-service'
 import type { WorktreeProvenanceDeps } from '../../application/worktree-provenance-bind-step'
 import type { ShadowSettlementDeps } from '../../application/reconcile-shadow-execution-state'
+import { reconcileOrphanShadowState } from '../../application/reconcile-orphan-shadow-state'
 import {
   assertNoSqliteSidecars,
   DbGuardError,
@@ -18,6 +20,7 @@ import {
 import type { NativeRunResult } from '../../infrastructure/aicontrol-native/disposable-aicontrol-env'
 import { NativeResultsAuthoritativeExecutor } from '../../infrastructure/aicontrol-native/native-results-authoritative-executor'
 import { DisposableShadowRoot } from '../../infrastructure/disposable-shadow-root'
+import { resolveDurableShadowLifecycleRoot } from '../../infrastructure/durable-shadow-lifecycle-root'
 import {
   durableShadowWorktreeDir,
   resolveDurableShadowWorktreeRoot
@@ -28,12 +31,19 @@ import { assertExecutionStorePathNotAlias } from '../../infrastructure/execution
 import { OrcaExecutionPlane } from '../../infrastructure/orca-execution-plane'
 import { ReadOnlyShadowSettlementSource } from '../../infrastructure/read-only-shadow-settlement-source'
 import { ReadOnlyWorktreeProvenanceSource } from '../../infrastructure/read-only-worktree-provenance-source'
+import { ShadowLifecycleProcessAdapter } from '../../infrastructure/shadow-lifecycle-process-adapter'
+import { SqliteDispatchLifecycleClosureStore } from '../../infrastructure/sqlite-dispatch-lifecycle-closure-store'
+import { SqliteDispatchLifecycleEventStore } from '../../infrastructure/sqlite-dispatch-lifecycle-event-store'
+import { SqliteDispatchLifecycleIncidentStore } from '../../infrastructure/sqlite-dispatch-lifecycle-incident-store'
+import { SqliteDispatchProcessBindingStore } from '../../infrastructure/sqlite-dispatch-process-binding-store'
+import { SqliteDispatchTerminationStore } from '../../infrastructure/sqlite-dispatch-termination-store'
 import { SqliteDispatchWorktreeStore } from '../../infrastructure/sqlite-dispatch-worktree-store'
 import { SqliteExecutionStore } from '../../infrastructure/sqlite-execution-store'
 import { SqliteReservationStore } from '../../infrastructure/sqlite-reservation-store'
 import { SqliteRunBindingCandidateHeadStore } from '../../infrastructure/sqlite-run-binding-candidate-head-store'
 import { SqliteSettlementIncidentStore } from '../../infrastructure/sqlite-settlement-incident-store'
 import { SqliteSettlementObservationStore } from '../../infrastructure/sqlite-settlement-observation-store'
+import { SqliteWorktreeFinalizationStore } from '../../infrastructure/sqlite-worktree-finalization-store'
 import { SqliteWorktreeProvenanceIncidentStore } from '../../infrastructure/sqlite-worktree-provenance-incident-store'
 import { SqliteWorktreeProvenanceStore } from '../../infrastructure/sqlite-worktree-provenance-store'
 import { FROZEN_SLOTS, SHADOW_IDENTITY_OBSERVATION_SLICE_REF } from './frozen-sample'
@@ -63,6 +73,9 @@ import { FROZEN_SLOTS, SHADOW_IDENTITY_OBSERVATION_SLICE_REF } from './frozen-sa
 const SHADOW_COORD_PANE_KEY = 'tab_orca_s1_shadow:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
 const DEFAULT_DURABLE_SHADOW_DB = join(tmpdir(), 'maestro', 'orca-s2', 'shadow-orchestration.db')
 const DEFAULT_DURABLE_SHADOW_WORKTREE_ROOT = join(tmpdir(), 'maestro', 'orca-s3', 'shadow-worktrees')
+const DEFAULT_DURABLE_SHADOW_LIFECYCLE_ROOT = join(tmpdir(), 'maestro', 'orca-s4', 'shadow-lifecycle')
+/** §10.3 — an in-flight bind younger than this is never treated as an orphan. */
+const ORPHAN_GRACE_MS = 5 * 60_000
 
 export type ShadowIdentityObservationInput = {
   /** Canonical aiControlCenter data/app.db — GUARD ONLY (sha256 + sidecars). Never opened. */
@@ -82,6 +95,13 @@ export type ShadowIdentityObservationInput = {
    * (`shadowOrchestrationPath !== ':memory:'`).
    */
   durableShadowWorktreeRootPath?: string
+  /**
+   * ORCA-S4 §9.2 — the ONE durable shadow-lifecycle root path (the process
+   * identity sidecar home). Defaults to a stable out-of-root path. Only
+   * resolved / composed when S3's durable shadow-worktree root is also
+   * composed (S4 depends on it, §2).
+   */
+  durableShadowLifecycleRootPath?: string
   /** Real terminal results of the aiControl native runs (one per frozen workload). */
   nativeResults: readonly NativeRunResult[]
   /** §9 / §15.2 — cutoff after which a still-non-terminal bound Dispatch is abandoned. */
@@ -148,6 +168,7 @@ export async function executeShadowIdentityObservationSlice(
   let source: ReadOnlyShadowSettlementSource | null = null
   let settlement: ShadowSettlementDeps | undefined
   let worktreeProvenance: WorktreeProvenanceDeps | undefined
+  let delegationBoundary: DelegationBoundaryDeps | undefined
   if (!memoryMode && durablePath) {
     source = new ReadOnlyShadowSettlementSource(durablePath)
     settlement = {
@@ -173,6 +194,28 @@ export async function executeShadowIdentityObservationSlice(
       durableShadowWorktreeRoot: durableWorktreeRoot,
       txn: store
     }
+
+    // ORCA-S4 §9.2 — resolve + re-verify the durable shadow-lifecycle root
+    // BEFORE first use, only when S3's durable shadow-worktree root is itself
+    // composed (S4 depends on it and on worktree_provenance truth).
+    const configuredLifecycleRoot =
+      input.durableShadowLifecycleRootPath ?? DEFAULT_DURABLE_SHADOW_LIFECYCLE_ROOT
+    const durableLifecycleRoot = resolveDurableShadowLifecycleRoot(execDb, configuredLifecycleRoot)
+    delegationBoundary = {
+      processBindings: new SqliteDispatchProcessBindingStore(execDb),
+      terminations: new SqliteDispatchTerminationStore(execDb),
+      finalizations: new SqliteWorktreeFinalizationStore(execDb),
+      closures: new SqliteDispatchLifecycleClosureStore(execDb),
+      events: new SqliteDispatchLifecycleEventStore(execDb),
+      incidents: new SqliteDispatchLifecycleIncidentStore(execDb),
+      processPort: new ShadowLifecycleProcessAdapter(),
+      // No persistent cross-call handle registry is threaded through this
+      // composition root today — every restart-recovered corroboration path
+      // (§9.1.2) is exercised instead of the live-handle fast path, which is
+      // strictly more rigorous, never less correct (§14 LIFE-2).
+      liveHandles: new Map(),
+      durableShadowLifecycleRoot: durableLifecycleRoot
+    }
   }
 
   const profiles = nativeProfiles(input.nativeResults)
@@ -192,6 +235,21 @@ export async function executeShadowIdentityObservationSlice(
     }
   })
 
+  // ORCA-S4 §10.3, §9.2 — reconcileOrphanShadowState is invoked ONCE per
+  // composition-root run, BEFORE the main sweep chain, when S4 is composed.
+  if (delegationBoundary && worktreeProvenance) {
+    await reconcileOrphanShadowState(
+      {
+        dispatchWorktrees: worktreeProvenance.dispatchWorktrees,
+        processBindings: delegationBoundary.processBindings,
+        processPort: delegationBoundary.processPort,
+        durableShadowWorktreeRoot: worktreeProvenance.durableShadowWorktreeRoot,
+        durableShadowLifecycleRoot: delegationBoundary.durableShadowLifecycleRoot
+      },
+      { orphanGraceMs: ORPHAN_GRACE_MS, now }
+    )
+  }
+
   let report: ShadowObservationReport
   try {
     report = await runShadowObservation(
@@ -201,7 +259,8 @@ export async function executeShadowIdentityObservationSlice(
         store,
         reservations,
         settlement,
-        worktreeProvenance
+        worktreeProvenance,
+        delegationBoundary
       },
       {
         sliceRef: SHADOW_IDENTITY_OBSERVATION_SLICE_REF,

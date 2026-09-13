@@ -1,7 +1,12 @@
 # ORCA-S4 — RED-BEFORE-GREEN Evidence
 
-**State class:** `RED_BASELINE_READY_FOR_IMPLEMENTATION`
-**Display verdict:** `MAESTRO_ORCA_S4_GENUINE_RED_BASELINE_READY_FOR_GREEN_IMPLEMENTATION`
+**State class (at the RED commit):** `RED_BASELINE_READY_FOR_IMPLEMENTATION`
+**Display verdict (at the RED commit):** `MAESTRO_ORCA_S4_GENUINE_RED_BASELINE_READY_FOR_GREEN_IMPLEMENTATION`
+
+**Current state:** GREEN — see "GREEN implementation addendum" at the end of
+this document for the implementing commit and the RED→GREEN evidence per
+invariant/window/gate. Everything above this line is preserved exactly as
+written at the RED commit; nothing below was true yet at that commit.
 
 Frozen contract: [`SPEC.md`](./SPEC.md), HEAD `521fb80036b158518967948848517cbcfac113f5`
 (unedited by this session — no production S4 implementation exists at this commit).
@@ -481,3 +486,165 @@ This RED baseline contains **zero** production S4 implementation: no schema
 edit, no store/service/port/adapter implementation, no composition-root
 wiring, no SPEC edit. `ORCA_DELEGATED` and M5 are untouched and unmentioned
 outside quoted SPEC citations.
+
+---
+
+## GREEN implementation addendum
+
+**RED baseline commit:** `9ba6ea5456a8d30ee78700433ee7efaa01d0ab5b` (unchanged, not rewritten).
+**Implementing commit:** see the GREEN commit on this branch immediately following the RED commit.
+
+Every module named in "Target module surface" above now exists and is
+implemented. `pnpm test src/main/execution src/shared/child-process` (the
+exact reproduction command from the top of this document) is GREEN in full:
+
+```
+Test Files  80 passed | 2 skipped (82)
+     Tests  605 passed | 15 skipped (620)
+```
+
+The 313 pre-existing tests remain green and unmodified in behavior. One
+pre-existing S3 test file (`execution-schema.v4-migration.test.ts`) had its
+three hardcoded `EXECUTION_SCHEMA_VERSION === 4` / `{value:'4'}` literal
+assertions updated to `>= 4` / the live constant — the exact eventuality the
+sibling S2-era test already anticipated in its own comment ("ORCA-S3 bumps it
+further to 4"). The behavior under test (v3→v4 table creation, row
+preservation, idempotency) is byte-identical; only the now-stale version
+literal changed. No other pre-existing file's test assertions were altered.
+
+### LIFE-1..15 RED→GREEN
+
+Every invariant listed in the "LIFE-1..15 cross-reference" table above is
+GREEN via its cited test file, with no assertion weakened from the RED
+commit's own text.
+
+### L1-L14 RED→GREEN
+
+All of L1-L11 are GREEN via `delegated-side-effect-boundary.crash-windows.test.ts`
+(L1 and L6 exercise a REAL spawned + SIGKILLed/self-exited child process; L2-L5,
+L7, L8, L10, L11 exercise real SQLite + real filesystem state). L12/L13 are
+GREEN via `converge-delegation-boundary-lifecycle.process-identity-safety.test.ts`
+(spy-asserted: zero `requestTerminationByPid` calls on every mismatch
+scenario). L14 is GREEN via `converge-delegation-boundary-lifecycle.late-conflict.test.ts`'s
+exact six-step scenario. **5 consecutive full runs** of the combined L1-L14 +
+composition-root suite were captured GREEN with no skip and no retry masking
+before this addendum was written.
+
+### Acceptance gates 1-25
+
+All GREEN via the files cited in the "Acceptance gates 1-25 cross-reference"
+table above. Gate 25's macOS matrix is GREEN both at the pure-function level
+(`macos-argv-identity-proof.test.ts`, runs on every OS since it fakes the OS
+observation) and at the service level with a signal-call spy
+(`process-identity-safety.test.ts`).
+
+### SOURCE/PROJECTION proof
+
+GREEN: `dispatch_process_binding`, `dispatch_termination`,
+`worktree_finalization`, `dispatch_lifecycle_closure`,
+`dispatch_lifecycle_event` survive `migrateExecutionStore`'s projection-rebuild
+path byte-for-byte; `dispatch_lifecycle_incident` is the only one dropped
+(`DROP TABLE IF EXISTS dispatch_lifecycle_incident;` inside
+`migrateExecutionStore` — no separate rebuild helper was needed since the six-
+table SQL is idempotent `CREATE TABLE IF NOT EXISTS`).
+
+### Process-identity proof by platform
+
+- **Windows** (this development/test host's actual platform):
+  `captureOsStartMarkerSync` / `readCurrentOsStartMarker` use a synchronous /
+  asynchronous `Get-CimInstance Win32_Process` PowerShell query (routed through
+  `runProcessSync`/`runProcess`, never raw `child_process`), verified against a
+  **real spawned, real killed** process in
+  `shadow-lifecycle-process-adapter.test.ts` and
+  `shadow-lifecycle-process-adapter.restart-recovered.test.ts`.
+- **Linux**: `/proc/<pid>/stat` field-22 `starttime` parsing (pure
+  string/regex logic, platform-branch-tested via the domain-level pure
+  functions since this development host is Windows).
+- **macOS**: `ps -ww -p <pid> -o lstart= -o command=` (accepted hardening #1,
+  `-ww` present), boundary-anchored `--processNonce=` token extraction
+  (accepted hardening #2 — proven exact, never substring, in
+  `macos-argv-identity-proof.test.ts`'s dedicated hardening cases).
+
+### PID-reuse proof
+
+GREEN — `process-identity-safety.test.ts`'s window-L12 tests: a spy on
+`requestTerminationByPid` asserts **zero** calls when the current OS marker
+disagrees with the durable spawn-time marker, and **exactly one** call in the
+matching positive control.
+
+### macOS same-second + -ww + anchored-token proof
+
+GREEN — `macos-argv-identity-proof.test.ts` (pure function, gate 25) and
+`process-identity-safety.test.ts` (service-level, spy-asserted). `-ww` is
+implemented in `process-instance-discriminator.ts`'s `readMacosProcessObservation`
+/ `captureMacosLstartSync`. Boundary-anchored matching is implemented via
+whitespace-tokenized exact-value extraction in `macos-argv-identity-proof.ts`
+(never `.includes()`), with tests proving both substring directions fail closed.
+
+### Termination protocol proof
+
+GREEN — `shadow-lifecycle-process-adapter.test.ts` (live handle),
+`shadow-lifecycle-process-adapter.restart-recovered.test.ts` (pid-addressed),
+crash-windows L1/L2/L6/L8, and the orchestrator's own retryable-code tests. No
+callback/hook is a correctness dependency (`converge-delegation-boundary-lifecycle.test.ts`'s
+LIFE-8 test: 0/1/5 hook fires produce identical durable results).
+
+### Worktree-finalization proof
+
+GREEN — `worktree-finalizer.test.ts`: eligibility, intent-before-deletion,
+digest-mismatch → conflicted (no deletion attempted), idempotent
+already-absent-is-success, `isInside` confinement refusal.
+
+### Orphan reconciliation proof
+
+GREEN — `reconcile-orphan-shadow-state.test.ts`: both classes untouched within
+`orphanGraceMs`, reaped + audit-logged past it (fingerprint only, never a raw
+path), corrupt/unverifiable sidecar skipped-and-logged, never a fabricated
+Execution-store row.
+
+### Closure/event immutability proof
+
+GREEN — `sqlite-dispatch-lifecycle-closure-store.test.ts` (PK forbids a
+replacement row; the one permitted marker mutation touches nothing else) and
+`sqlite-dispatch-lifecycle-event-store.test.ts` (composite-PK idempotency).
+
+### Composition-root / sibling-sweep integration
+
+Implemented and verified through **real execution**, not merely typecheck:
+`worktree-provenance-bind-step.ts`'s `bindDispatchWorktree` accepts an
+optional `delegationBoundary` parameter (two more pre-transaction steps +
+one more insert inside the same transaction, exactly per §9.2 — omitting it
+reproduces the pre-S4 behavior byte-for-byte); `shadow-observation-service.ts`
+invokes `convergeDelegationBoundaryLifecycle` as a sibling sweep immediately
+after `convergeWorktreeProvenance` returns; `shadow-identity-observation.ts`
+(the single composition boundary) resolves the durable shadow-lifecycle root,
+constructs the six S4 stores + the real adapter, and invokes
+`reconcileOrphanShadowState` once per run before the main sweep chain. This
+wiring is exercised for real — a genuine process spawn, a genuine sidecar
+write, a genuine `dispatch_process_binding` insert, and a genuine restart-
+recovered termination — by ORCA-S3's own pre-existing
+`durable-worktree-provenance.composition-root.test.ts` (a bind call then a
+restart call through the real `executeShadowIdentityObservationSlice`
+composition root), which stays green with S4 wired in. A dedicated S4
+composition-level acceptance test is a reasonable next addition but was not
+required to make this wiring genuinely exercised: the S3 test above already
+drives it end-to-end. `liveHandles` is composed as an empty `Map` per call —
+this composition root does not persist a cross-call handle registry, so every
+termination goes through the restart-recovered identity-verification path
+rather than the live-handle fast path. This is strictly more rigorous, never
+less correct (§14 LIFE-2), and is disclosed here as a known simplification
+rather than a gap: threading a persistent handle registry through for the
+fast path is a reasonable follow-up, not a correctness requirement.
+
+### Known non-blocking residuals
+
+- No dedicated, purpose-built composition-level S4 acceptance test yet exists
+  (distinct from the S3 test that happens to exercise the wiring) — a natural
+  next addition for the independent reviewer's own test-authoring pass.
+- The live-handle fast path (§9.1.1) is implemented and unit-tested
+  (`shadow-lifecycle-process-adapter.test.ts`) but not exercised through the
+  composition root, which always passes an empty `liveHandles` map (see above).
+- Linux `/proc/<pid>/stat` parsing and macOS `ps` parsing are covered by pure
+  logic tests and by the Windows-real-process adapter tests on this
+  development host; neither platform's live OS call path itself runs in this
+  Windows CI/dev environment.

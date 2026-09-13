@@ -13,8 +13,13 @@ import type SyncDatabase from '../../sqlite/sync-database'
 // ORCA-S3 (§7, SPEC-AMENDMENT-001 §6): schema v3 → v4 — THREE NEW TABLES
 // (dispatch_worktree, worktree_provenance, worktree_provenance_incident) + their
 // indexes. Zero column added to any ORCA-S1/S2 table.
+//
+// ORCA-S4 (§8): schema v4 → v5 — SIX NEW TABLES (dispatch_process_binding,
+// dispatch_termination, worktree_finalization, dispatch_lifecycle_incident,
+// dispatch_lifecycle_closure, dispatch_lifecycle_event) + their indexes. Zero
+// column added to any ORCA-S1/S2/S3 table.
 
-export const EXECUTION_SCHEMA_VERSION = 4
+export const EXECUTION_SCHEMA_VERSION = 5
 
 const CREATE_SQL = `
 CREATE TABLE IF NOT EXISTS run_reservation (
@@ -195,6 +200,92 @@ CREATE INDEX IF NOT EXISTS worktree_provenance_incident_by_slice
   ON worktree_provenance_incident(slice_ref);
 `
 
+/**
+ * ORCA-S4 §8 — the six new S4 tables + indexes. Kept as its own constant, same
+ * discipline as SETTLEMENT_PROJECTION_SQL / WORKTREE_PROVENANCE_PROJECTION_SQL,
+ * so the projection rebuild (§8.8) recreates EXACTLY the same shape it drops
+ * for `dispatch_lifecycle_incident` — the only one of the six classified
+ * PROJECTION (§8.0, §8.0.1). The other five are durable SOURCE state and are
+ * never touched by a rebuild.
+ */
+export const DELEGATION_BOUNDARY_LIFECYCLE_SQL = `
+CREATE TABLE IF NOT EXISTS dispatch_process_binding (
+  orca_dispatch_id  TEXT PRIMARY KEY,
+  correlation_id    TEXT NOT NULL REFERENCES run_reservation(correlation_id),
+  orca_run_id       TEXT NOT NULL,
+  process_nonce     TEXT NOT NULL,
+  pid               INTEGER NOT NULL,
+  kill_scope        TEXT NOT NULL,
+  os_start_marker        TEXT,
+  os_start_marker_source TEXT NOT NULL,
+  spawned_at        TEXT NOT NULL,
+  teardown_requested_at TEXT
+);
+CREATE INDEX IF NOT EXISTS dispatch_process_binding_by_correlation ON dispatch_process_binding(correlation_id);
+
+CREATE TABLE IF NOT EXISTS dispatch_termination (
+  correlation_id      TEXT PRIMARY KEY REFERENCES run_reservation(correlation_id),
+  orca_dispatch_id    TEXT NOT NULL,
+  termination_method  TEXT NOT NULL,
+  exit_code           INTEGER,
+  exit_signal         TEXT,
+  tree_verified       INTEGER NOT NULL,
+  observed_at         TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS worktree_finalization (
+  correlation_id       TEXT PRIMARY KEY REFERENCES run_reservation(correlation_id),
+  orca_dispatch_id     TEXT NOT NULL,
+  slice_ref            TEXT NOT NULL,
+  eligibility_digest   TEXT NOT NULL,
+  intent_recorded_at   TEXT NOT NULL,
+  status               TEXT NOT NULL DEFAULT 'intent_recorded',
+  finalized_at         TEXT,
+  outcome_detail_json  TEXT,
+  conflicted_at        TEXT
+);
+
+CREATE TABLE IF NOT EXISTS dispatch_lifecycle_incident (
+  id               TEXT PRIMARY KEY,
+  correlation_id   TEXT NOT NULL REFERENCES run_reservation(correlation_id),
+  orca_dispatch_id TEXT,
+  slice_ref        TEXT NOT NULL,
+  kind             TEXT NOT NULL,
+  evidence_digest  TEXT NOT NULL,
+  detail_json      TEXT NOT NULL,
+  blocked          INTEGER NOT NULL DEFAULT 1,
+  resolved_at      TEXT,
+  resolution_note  TEXT,
+  raised_at        TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS dispatch_lifecycle_incident_unique
+  ON dispatch_lifecycle_incident(correlation_id, kind, evidence_digest);
+CREATE INDEX IF NOT EXISTS dispatch_lifecycle_incident_by_slice
+  ON dispatch_lifecycle_incident(slice_ref);
+
+CREATE TABLE IF NOT EXISTS dispatch_lifecycle_closure (
+  correlation_id          TEXT PRIMARY KEY REFERENCES run_reservation(correlation_id),
+  orca_dispatch_id        TEXT NOT NULL,
+  orca_run_id             TEXT NOT NULL,
+  slice_ref               TEXT NOT NULL,
+  settlement_status_ref   TEXT NOT NULL,
+  worktree_provenance_ref TEXT NOT NULL,
+  termination_method_ref  TEXT NOT NULL,
+  finalization_status_ref TEXT NOT NULL,
+  closure_digest          TEXT NOT NULL,
+  closed_at               TEXT NOT NULL,
+  post_closure_settlement_conflict_detected_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS dispatch_lifecycle_event (
+  correlation_id      TEXT NOT NULL REFERENCES run_reservation(correlation_id),
+  event_kind          TEXT NOT NULL,
+  closure_digest_ref  TEXT NOT NULL,
+  emitted_at          TEXT NOT NULL,
+  PRIMARY KEY (correlation_id, event_kind)
+);
+`
+
 function readSchemaVersion(db: SyncDatabase): number | undefined {
   const row = db.prepare("SELECT value FROM execution_meta WHERE key = 'schema_version'").get() as
     | { value: string }
@@ -219,15 +310,16 @@ export function migrateExecutionStore(db: SyncDatabase): void {
     db.exec(SETTLEMENT_PROJECTION_SQL)
     db.exec(DISPATCH_WORKTREE_SQL)
     db.exec(WORKTREE_PROVENANCE_PROJECTION_SQL)
+    db.exec(DELEGATION_BOUNDARY_LIFECYCLE_SQL)
     const current = readSchemaVersion(db)
     if (current === undefined) {
       db.prepare("INSERT INTO execution_meta (key, value) VALUES ('schema_version', ?)").run(
         String(EXECUTION_SCHEMA_VERSION)
       )
     } else if (current < EXECUTION_SCHEMA_VERSION) {
-      // Both the v2->v3 and v3->v4 steps are only "ensure the new tables +
-      // indexes exist" — done by the CREATE statements above, because neither
-      // S2 nor S3 adds a column and therefore neither needs an ALTER TABLE.
+      // The v2->v3, v3->v4, and v4->v5 steps are all only "ensure the new
+      // tables + indexes exist" — done by the CREATE statements above, because
+      // none of S2/S3/S4 adds a column and therefore none needs an ALTER TABLE.
       db.prepare("UPDATE execution_meta SET value = ? WHERE key = 'schema_version'").run(
         String(EXECUTION_SCHEMA_VERSION)
       )

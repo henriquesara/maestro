@@ -4,6 +4,11 @@
 // adjudication (§7). Advisory only — never touches an authoritative run.
 
 import type { AuthoritativeExecutor } from './authoritative-executor'
+import {
+  convergeDelegationBoundaryLifecycle,
+  type DelegationBoundaryLifecycleDeps,
+  type DelegationBoundaryLifecycleReport
+} from './converge-delegation-boundary-lifecycle'
 import type { SettlementConvergenceReport } from './converge-settlements'
 import type { WorktreeProvenanceConvergenceReport } from './converge-worktree-provenance'
 import type { ExecutionPlane } from './execution-plane'
@@ -13,7 +18,11 @@ import {
   type ShadowSettlementDeps
 } from './reconcile-shadow-execution-state'
 import type { ReservationStore } from './reservation-store'
-import { bindDispatchWorktree, type WorktreeProvenanceDeps } from './worktree-provenance-bind-step'
+import {
+  bindDispatchWorktree,
+  type DelegationBoundaryBindDeps,
+  type WorktreeProvenanceDeps
+} from './worktree-provenance-bind-step'
 import { convergeWorktreeProvenanceSibling } from './worktree-provenance-converge-sibling'
 import {
   makeAiControlRunRef,
@@ -69,6 +78,23 @@ export type ShadowObservationReport = {
   settlementConvergence?: SettlementConvergenceReport
   /** ORCA-S3 — the sibling worktree-provenance convergence report, when S3 is composed. */
   worktreeProvenanceConvergence?: WorktreeProvenanceConvergenceReport
+  /** ORCA-S4 — the third sibling sweep's report, when S4 is composed. */
+  delegationBoundaryLifecycle?: DelegationBoundaryLifecycleReport
+}
+
+/**
+ * ORCA-S4 §9.2/§11 — present only when S4 is composed (requires
+ * `worktreeProvenance` and `settlement` too, since S4 depends on S3's durable
+ * shadow-worktree root and on S2's settled-status truth).
+ */
+export type DelegationBoundaryDeps = DelegationBoundaryBindDeps & {
+  terminations: DelegationBoundaryLifecycleDeps['terminations']
+  finalizations: DelegationBoundaryLifecycleDeps['finalizations']
+  closures: DelegationBoundaryLifecycleDeps['closures']
+  events: DelegationBoundaryLifecycleDeps['events']
+  incidents: DelegationBoundaryLifecycleDeps['incidents']
+  /** Live ChildProcess handles for shadow lifecycle processes spawned by the CURRENT composition-root instance. */
+  liveHandles: DelegationBoundaryLifecycleDeps['liveHandles']
 }
 
 export type ShadowObservationDeps = {
@@ -80,6 +106,8 @@ export type ShadowObservationDeps = {
   settlement?: ShadowSettlementDeps
   /** ORCA-S3 §7 — present when a durable shadow-worktree root is composed (requires `settlement`). */
   worktreeProvenance?: WorktreeProvenanceDeps
+  /** ORCA-S4 §9.2/§11 — present when S4 is composed (requires `worktreeProvenance` + `settlement`). */
+  delegationBoundary?: DelegationBoundaryDeps
 }
 
 function sanitize(error: unknown): string {
@@ -118,6 +146,35 @@ export async function runShadowObservation(
       input.sliceRef,
       input.now,
       input.newId
+    )
+  }
+
+  // ORCA-S4 §11 — the third sibling sweep, invoked immediately AFTER
+  // convergeWorktreeProvenance(...) returns (requires `worktreeProvenance` +
+  // `settlement` — S4 depends on S3's durable shadow-worktree root and on
+  // S2's settled-status truth). Never a phase inside S2 or S3's own coordinators.
+  let delegationBoundaryLifecycle: DelegationBoundaryLifecycleReport | undefined
+  if (deps.delegationBoundary && deps.worktreeProvenance && deps.settlement) {
+    delegationBoundaryLifecycle = await convergeDelegationBoundaryLifecycle(
+      {
+        bindings: store,
+        settlements: deps.settlement.observations,
+        dispatchWorktrees: deps.worktreeProvenance.dispatchWorktrees,
+        provenance: deps.worktreeProvenance.provenance,
+        worktreeProvenanceIncidents: deps.worktreeProvenance.incidents,
+        processBindings: deps.delegationBoundary.processBindings,
+        terminations: deps.delegationBoundary.terminations,
+        finalizations: deps.delegationBoundary.finalizations,
+        closures: deps.delegationBoundary.closures,
+        events: deps.delegationBoundary.events,
+        incidents: deps.delegationBoundary.incidents,
+        processPort: deps.delegationBoundary.processPort,
+        liveHandles: deps.delegationBoundary.liveHandles,
+        durableShadowWorktreeRoot: deps.worktreeProvenance.durableShadowWorktreeRoot,
+        now: input.now,
+        newId: input.newId
+      },
+      { sliceRef: input.sliceRef }
     )
   }
 
@@ -242,7 +299,8 @@ export async function runShadowObservation(
           shadowWorktree,
           input.sliceRef,
           input.now,
-          input.newId
+          input.newId,
+          deps.delegationBoundary
         )
       } else {
         store.recordBinding(binding) // I3
@@ -324,6 +382,7 @@ export async function runShadowObservation(
     abandoned,
     reconcile: { scanned: reconcile.scanned, abandoned: reconcile.abandoned.length },
     settlementConvergence: coordinated.convergence ?? undefined,
-    worktreeProvenanceConvergence
+    worktreeProvenanceConvergence,
+    delegationBoundaryLifecycle
   }
 }

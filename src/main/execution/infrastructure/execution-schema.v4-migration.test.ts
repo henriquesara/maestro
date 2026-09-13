@@ -13,6 +13,15 @@ import { EXECUTION_SCHEMA_VERSION, migrateExecutionStore } from './execution-sch
 // RED (real assertion failure, not import failure): `execution-schema.ts`
 // exists today at EXECUTION_SCHEMA_VERSION 3 with no S3 tables — every
 // assertion below fails against the current production module.
+//
+// ORCA-S4 note: EXECUTION_SCHEMA_VERSION is a single process-wide counter
+// (never a per-slice snapshot), and S4 legitimately bumps it 4 -> 5 (§8) —
+// exactly the eventuality the S2-era `execution-schema.migration.test.ts`
+// already anticipated ("ORCA-S3 bumps it further to 4"). The three literal
+// `4`s below are updated to `>= 4` / the live constant so this file keeps
+// testing its own real subject — the v3->v4 step's tables, row-preservation,
+// and idempotency — without re-asserting a version number that is no longer
+// current. No other assertion in this file changes.
 
 function tableColumns(db: SyncDatabase, table: string): string[] {
   return (db.pragma(`table_info(${table})`) as { name: string }[]).map((r) => r.name).sort()
@@ -35,8 +44,8 @@ describe('migrateExecutionStore — v3 → v4 versioned upgrade (§7, §12 PROV-
     return d
   }
 
-  it('EXECUTION_SCHEMA_VERSION is 4', () => {
-    expect(EXECUTION_SCHEMA_VERSION).toBe(4)
+  it('EXECUTION_SCHEMA_VERSION is at least 4 (ORCA-S4 bumps it further to 5)', () => {
+    expect(EXECUTION_SCHEMA_VERSION).toBeGreaterThanOrEqual(4)
   })
 
   it('a fresh store gains dispatch_worktree, worktree_provenance, worktree_provenance_incident', () => {
@@ -47,7 +56,7 @@ describe('migrateExecutionStore — v3 → v4 versioned upgrade (§7, §12 PROV-
     expect(tableColumns(db, 'worktree_provenance_incident').length).toBeGreaterThan(0)
     expect(
       db.prepare("SELECT value FROM execution_meta WHERE key = 'schema_version'").get()
-    ).toEqual({ value: '4' })
+    ).toEqual({ value: String(EXECUTION_SCHEMA_VERSION) })
     db.close()
   })
 
@@ -165,7 +174,7 @@ describe('migrateExecutionStore — v3 → v4 versioned upgrade (§7, §12 PROV-
     expect(after).toEqual(before)
     expect(
       db.prepare("SELECT value FROM execution_meta WHERE key = 'schema_version'").get()
-    ).toEqual({ value: '4' })
+    ).toEqual({ value: String(EXECUTION_SCHEMA_VERSION) })
     db.close()
   })
 

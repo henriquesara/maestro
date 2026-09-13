@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -16,7 +16,7 @@ import { SqliteWorktreeFinalizationStore } from '../infrastructure/sqlite-worktr
 import { SqliteWorktreeProvenanceIncidentStore } from '../infrastructure/sqlite-worktree-provenance-incident-store'
 import { SqliteWorktreeProvenanceStore } from '../infrastructure/sqlite-worktree-provenance-store'
 import { fixtureBinding, fixtureSettlementObservation, fixtureWorktreeProvenance } from '../slices/delegated-side-effect-boundary/delegated-side-effect-boundary-test-harness'
-import { convergeDelegationBoundaryLifecycle } from './converge-delegation-boundary-lifecycle'
+import { convergeDelegationBoundaryLifecycle, type ProcessLifecycleObservationLike } from './converge-delegation-boundary-lifecycle'
 
 // ORCA-S4 SPEC §11 — the third sibling sweep. Phases 1-5, §8.7 prospective
 // eligibility, §13 failure semantics, §14 LIFE-9 incident isolation. A fake,
@@ -28,12 +28,18 @@ import { convergeDelegationBoundaryLifecycle } from './converge-delegation-bound
 
 const SLICE = 'ORCA-S4'
 
-function fakePort(overrides: Partial<Record<string, unknown>> = {}) {
+type FakePortOverrides = Partial<{
+  observe: () => Promise<ProcessLifecycleObservationLike>
+  requestTermination: () => Promise<{ verified: boolean }>
+  requestTerminationByPid: () => Promise<{ verified: boolean }>
+}>
+
+function fakePort(overrides: FakePortOverrides = {}) {
   return {
     spawn: () => {
       throw new Error('spawn is not exercised by the sweep — bind-time seam only')
     },
-    observe: async () => ({ kind: 'self_exit', exitCode: 0, exitSignal: null }),
+    observe: async (): Promise<ProcessLifecycleObservationLike> => ({ kind: 'self_exit', exitCode: 0, exitSignal: null }),
     requestTermination: async () => ({ verified: true }),
     requestTerminationByPid: async () => ({ verified: true }),
     ...overrides

@@ -17,7 +17,7 @@ import { SqliteSettlementObservationStore } from '../../infrastructure/sqlite-se
 import { SqliteWorktreeFinalizationStore } from '../../infrastructure/sqlite-worktree-finalization-store'
 import { SqliteWorktreeProvenanceIncidentStore } from '../../infrastructure/sqlite-worktree-provenance-incident-store'
 import { SqliteWorktreeProvenanceStore } from '../../infrastructure/sqlite-worktree-provenance-store'
-import { convergeDelegationBoundaryLifecycle } from '../../application/converge-delegation-boundary-lifecycle'
+import { convergeDelegationBoundaryLifecycle, type ProcessLifecycleObservationLike } from '../../application/converge-delegation-boundary-lifecycle'
 import {
   fixtureBinding,
   fixtureSettlementObservation,
@@ -61,16 +61,19 @@ function setup(dir: string) {
 }
 
 function seedEligibleBinding(s: ReturnType<typeof setup>, cid = 'corr_1') {
-  s.bindings.recordBinding(fixtureBinding({ correlationId: cid as never, sliceRef: SLICE }))
-  s.settlements.insert(fixtureSettlementObservation({ correlationId: cid, sliceRef: SLICE }))
-  s.provenance.insert(fixtureWorktreeProvenance({ correlationId: cid, sliceRef: SLICE }))
+  const dispatchId = cid === 'corr_1' ? 'ctx_1' : `ctx_${cid}`
+  s.bindings.recordBinding(
+    fixtureBinding({ correlationId: cid as never, orcaDispatchId: dispatchId as never, sliceRef: SLICE })
+  )
+  s.settlements.insert(fixtureSettlementObservation({ correlationId: cid, orcaDispatchId: dispatchId, sliceRef: SLICE }))
+  s.provenance.insert(fixtureWorktreeProvenance({ correlationId: cid, orcaDispatchId: dispatchId, sliceRef: SLICE }))
 }
 
 const fakePort = {
   spawn: () => {
     throw new Error('not exercised')
   },
-  observe: async () => ({ kind: 'confirmed_dead_unknown_cause' }),
+  observe: async (): Promise<ProcessLifecycleObservationLike> => ({ kind: 'confirmed_dead_unknown_cause' }),
   requestTermination: async () => ({ verified: true }),
   requestTerminationByPid: async () => ({ verified: true })
 }
@@ -78,13 +81,16 @@ const fakePort = {
 describe('§12 window L1 — real self-exit with NO teardown_requested_at (real child process)', () => {
   const cleanups: (() => void)[] = []
   afterEach(() => {
-    while (cleanups.length) cleanups.pop()?.()
+    while (cleanups.length) {
+      cleanups.pop()?.()
+    }
   })
 
   it('shadow lifecycle process exits on its own before dispatch_termination is written -> "confirmed_dead_unknown_cause", exit_code/exit_signal NULL, NOT an incident', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'orca-s4-l1-'))
     cleanups.push(() => rmSync(dir, { recursive: true, force: true, maxRetries: 3 }))
     const s = setup(dir)
+    cleanups.push(() => s.db.close())
     seedEligibleBinding(s)
     const readyMarker = join(dir, 'READY')
     const child = spawn(process.execPath, [SHADOW_LIFECYCLE_CHILD, '--processNonce=nonce_1', readyMarker, 'self-exit'], {
@@ -135,6 +141,18 @@ describe('§12 window L2 — legitimate intermediate state, not a crash-recovery
     const dir = mkdtempSync(join(tmpdir(), 'orca-s4-l2-'))
     const s = setup(dir)
     seedEligibleBinding(s)
+    s.processBindings.insert({
+      orcaDispatchId: 'ctx_1',
+      correlationId: 'corr_1',
+      orcaRunId: 'run_1',
+      processNonce: 'nonce_1',
+      pid: 4242,
+      killScope: 'posix-process-group',
+      osStartMarker: '1000',
+      osStartMarkerSource: 'posix_proc_stat_starttime',
+      spawnedAt: '2026-09-13T00:00:00Z',
+      teardownRequestedAt: null
+    })
     s.terminations.insert({
       correlationId: 'corr_1',
       orcaDispatchId: 'ctx_1',
@@ -149,6 +167,7 @@ describe('§12 window L2 — legitimate intermediate state, not a crash-recovery
       { sliceRef: SLICE }
     )
     expect(s.finalizations.getByCorrelationId('corr_1')).toBeDefined()
+    s.db.close()
     rmSync(dir, { recursive: true, force: true, maxRetries: 3 })
   })
 })
@@ -158,6 +177,18 @@ describe('§12 windows L3/L4/L5 — one shared idempotent recovery path (§10.2)
     const dir = mkdtempSync(join(tmpdir(), 'orca-s4-l3-'))
     const s = setup(dir)
     seedEligibleBinding(s)
+    s.processBindings.insert({
+      orcaDispatchId: 'ctx_1',
+      correlationId: 'corr_1',
+      orcaRunId: 'run_1',
+      processNonce: 'nonce_1',
+      pid: 4242,
+      killScope: 'posix-process-group',
+      osStartMarker: '1000',
+      osStartMarkerSource: 'posix_proc_stat_starttime',
+      spawnedAt: '2026-09-13T00:00:00Z',
+      teardownRequestedAt: null
+    })
     s.terminations.insert({
       correlationId: 'corr_1',
       orcaDispatchId: 'ctx_1',
@@ -166,6 +197,16 @@ describe('§12 windows L3/L4/L5 — one shared idempotent recovery path (§10.2)
       exitSignal: null,
       treeVerified: true,
       observedAt: '2026-09-13T00:00:00Z'
+    })
+    const worktreeDirL3 = join(s.durableRoot, 'shadow-corr_1')
+    s.dispatchWorktrees.insert({
+      orcaDispatchId: 'ctx_1',
+      correlationId: 'corr_1',
+      orcaRunId: 'run_1',
+      worktreeNonce: 'wnonce_1',
+      worktreePath: worktreeDirL3,
+      rootRef: 'root_gen_1',
+      openedAt: '2026-09-13T00:00:00Z'
     })
     const { computeFinalizationEligibilityDigest } = await import('../../domain/worktree-finalization')
     const digest = computeFinalizationEligibilityDigest({
@@ -184,12 +225,13 @@ describe('§12 windows L3/L4/L5 — one shared idempotent recovery path (§10.2)
       outcomeDetailJson: null,
       conflictedAt: null
     })
-    // worktree already deleted (crash happened after deletion, before the UPDATE)
+    // worktree already deleted (crash happened after deletion, before the UPDATE) — worktreeDirL3 is never created on disk.
     await convergeDelegationBoundaryLifecycle(
       { ...s, processPort: fakePort, liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, now: () => '2026-09-13T01:00:00Z', newId: (p: string) => `${p}_1` },
       { sliceRef: SLICE }
     )
     expect(s.finalizations.getByCorrelationId('corr_1')?.status).toBe('finalized')
+    s.db.close()
     rmSync(dir, { recursive: true, force: true, maxRetries: 3 })
   })
 
@@ -197,6 +239,18 @@ describe('§12 windows L3/L4/L5 — one shared idempotent recovery path (§10.2)
     const dir = mkdtempSync(join(tmpdir(), 'orca-s4-l4-'))
     const s = setup(dir)
     seedEligibleBinding(s)
+    s.processBindings.insert({
+      orcaDispatchId: 'ctx_1',
+      correlationId: 'corr_1',
+      orcaRunId: 'run_1',
+      processNonce: 'nonce_1',
+      pid: 4242,
+      killScope: 'posix-process-group',
+      osStartMarker: '1000',
+      osStartMarkerSource: 'posix_proc_stat_starttime',
+      spawnedAt: '2026-09-13T00:00:00Z',
+      teardownRequestedAt: null
+    })
     s.terminations.insert({
       correlationId: 'corr_1',
       orcaDispatchId: 'ctx_1',
@@ -241,6 +295,7 @@ describe('§12 windows L3/L4/L5 — one shared idempotent recovery path (§10.2)
     )
     expect(existsSync(worktreeDir)).toBe(false)
     expect(s.finalizations.getByCorrelationId('corr_1')?.status).toBe('finalized')
+    s.db.close()
     rmSync(dir, { recursive: true, force: true, maxRetries: 3 })
   })
 })
@@ -248,13 +303,16 @@ describe('§12 windows L3/L4/L5 — one shared idempotent recovery path (§10.2)
 describe('§12 window L6 — real signalProcessTree in flight when host crashes (teardown_requested_at honesty)', () => {
   const cleanups: (() => void)[] = []
   afterEach(() => {
-    while (cleanups.length) cleanups.pop()?.()
+    while (cleanups.length) {
+      cleanups.pop()?.()
+    }
   })
 
   it('teardown_requested_at IS set, no dispatch_termination yet, process now confirmed dead -> "signalled" (attributable, NOT confirmed_dead_unknown_cause)', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'orca-s4-l6-'))
     cleanups.push(() => rmSync(dir, { recursive: true, force: true, maxRetries: 3 }))
     const s = setup(dir)
+    cleanups.push(() => s.db.close())
     seedEligibleBinding(s)
     const readyMarker = join(dir, 'READY')
     const child = spawn(process.execPath, [SHADOW_LIFECYCLE_CHILD, '--processNonce=nonce_1', readyMarker, 'hang'], {
@@ -298,6 +356,7 @@ describe('§12 window L7 — pre-commit process-spawn orphan (covered end-to-end
     // Deliberately NOT seeding anything — this IS the L7 shape: nothing committed.
     expect(s.bindings.getBindingByDispatch('ctx_orphan')).toBeUndefined()
     expect(s.processBindings.getByDispatchId('ctx_orphan')).toBeUndefined()
+    s.db.close()
     rmSync(dir, { recursive: true, force: true, maxRetries: 3 })
   })
 })
@@ -307,6 +366,18 @@ describe('§12 window L8 — duplicate finalization request across two sweep pas
     const dir = mkdtempSync(join(tmpdir(), 'orca-s4-l8-'))
     const s = setup(dir)
     seedEligibleBinding(s)
+    s.processBindings.insert({
+      orcaDispatchId: 'ctx_1',
+      correlationId: 'corr_1',
+      orcaRunId: 'run_1',
+      processNonce: 'nonce_1',
+      pid: 4242,
+      killScope: 'posix-process-group',
+      osStartMarker: '1000',
+      osStartMarkerSource: 'posix_proc_stat_starttime',
+      spawnedAt: '2026-09-13T00:00:00Z',
+      teardownRequestedAt: null
+    })
     s.terminations.insert({
       correlationId: 'corr_1',
       orcaDispatchId: 'ctx_1',
@@ -325,6 +396,7 @@ describe('§12 window L8 — duplicate finalization request across two sweep pas
       }
     ).c
     expect(count).toBe(1)
+    s.db.close()
     rmSync(dir, { recursive: true, force: true, maxRetries: 3 })
   })
 })
@@ -334,6 +406,18 @@ describe('§12 window L10 — SQLite write-lock not acquired within the busy bud
     const dir = mkdtempSync(join(tmpdir(), 'orca-s4-l10-'))
     const s = setup(dir)
     seedEligibleBinding(s)
+    s.processBindings.insert({
+      orcaDispatchId: 'ctx_1',
+      correlationId: 'corr_1',
+      orcaRunId: 'run_1',
+      processNonce: 'nonce_1',
+      pid: 4242,
+      killScope: 'posix-process-group',
+      osStartMarker: '1000',
+      osStartMarkerSource: 'posix_proc_stat_starttime',
+      spawnedAt: '2026-09-13T00:00:00Z',
+      teardownRequestedAt: null
+    })
     const busyPort = {
       ...fakePort,
       observe: async () => {
@@ -347,6 +431,7 @@ describe('§12 window L10 — SQLite write-lock not acquired within the busy bud
     expect(s.terminations.getByCorrelationId('corr_1')).toBeUndefined()
     expect(s.incidents.listBySlice(SLICE)).toHaveLength(0)
     expect(report.retryable.length).toBeGreaterThan(0)
+    s.db.close()
     rmSync(dir, { recursive: true, force: true, maxRetries: 3 })
   })
 })
@@ -357,6 +442,18 @@ describe('§12 window L11 — host restarts mid-batch, mixed per-binding progres
     const s = setup(dir)
     seedEligibleBinding(s, 'corr_advanced')
     seedEligibleBinding(s, 'corr_pending')
+    s.processBindings.insert({
+      orcaDispatchId: 'ctx_advanced',
+      correlationId: 'corr_advanced',
+      orcaRunId: 'run_1',
+      processNonce: 'nonce_advanced',
+      pid: 4242,
+      killScope: 'posix-process-group',
+      osStartMarker: '1000',
+      osStartMarkerSource: 'posix_proc_stat_starttime',
+      spawnedAt: '2026-09-13T00:00:00Z',
+      teardownRequestedAt: null
+    })
     s.processBindings.insert({
       orcaDispatchId: 'ctx_pending',
       correlationId: 'corr_pending',
@@ -392,6 +489,7 @@ describe('§12 window L11 — host restarts mid-batch, mixed per-binding progres
 
     // corr_advanced's closure must be byte-identical — never re-processed.
     expect(s.closures.getByCorrelationId('corr_advanced')).toEqual(advancedClosureBefore)
+    s.db.close()
     rmSync(dir, { recursive: true, force: true, maxRetries: 3 })
   })
 })

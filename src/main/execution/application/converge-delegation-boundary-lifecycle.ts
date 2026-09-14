@@ -6,6 +6,7 @@ import type { DispatchLifecycleIncidentKind } from '../domain/dispatch-lifecycle
 import { computeFinalizationEligibilityDigest } from '../domain/worktree-finalization'
 import { verifyRestartRecoveredIdentity } from '../domain/restart-recovered-identity-verification'
 import type { ChildProcessHandle } from '../../../shared/child-process/process-spec'
+import { processIdentitySidecarPath } from '../infrastructure/durable-shadow-lifecycle-root'
 import type { SqliteDispatchLifecycleClosureStore } from '../infrastructure/sqlite-dispatch-lifecycle-closure-store'
 import type { SqliteDispatchLifecycleEventStore } from '../infrastructure/sqlite-dispatch-lifecycle-event-store'
 import type { SqliteDispatchLifecycleIncidentStore } from '../infrastructure/sqlite-dispatch-lifecycle-incident-store'
@@ -63,6 +64,8 @@ export type DelegationBoundaryLifecycleDeps = {
   /** Live ChildProcess handles for shadow lifecycle processes spawned by the CURRENT composition-root instance (§6). Keyed by orcaDispatchId. */
   liveHandles: Map<string, ChildProcessHandle>
   durableShadowWorktreeRoot: string
+  /** §9.2 — the durable shadow-lifecycle root the process identity sidecar lives under. Required to re-read the REAL sidecar on the restart-recovered path (§9.1.2 check 1). */
+  durableShadowLifecycleRoot: string
   now: () => string
   newId: (prefix: string) => string
 }
@@ -116,7 +119,7 @@ async function resolvePhase1(
   const durable = {
     pid: processBinding.pid,
     processNonce: processBinding.processNonce,
-    identitySidecarPath: '',
+    identitySidecarPath: processIdentitySidecarPath(deps.durableShadowLifecycleRoot, orcaDispatchId),
     teardownRequestedAt: processBinding.teardownRequestedAt,
     osStartMarker: processBinding.osStartMarker,
     osStartMarkerSource: processBinding.osStartMarkerSource

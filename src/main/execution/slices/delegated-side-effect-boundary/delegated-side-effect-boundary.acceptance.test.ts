@@ -95,7 +95,7 @@ describe('ORCA-S4 acceptance — gates 15/16/20: zero data/app.db writes, zero a
     })
 
     await convergeDelegationBoundaryLifecycle(
-      { ...s, processPort: fakePort, liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, now: () => '2026-09-13T00:00:00Z', newId: (p: string) => `${p}_1` },
+      { ...s, processPort: fakePort, liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, durableShadowLifecycleRoot: s.durableRoot, now: () => '2026-09-13T00:00:00Z', newId: (p: string) => `${p}_1` },
       { sliceRef: SLICE }
     )
 
@@ -182,7 +182,7 @@ describe('ORCA-S4 acceptance — gate 4: SOURCE vs PROJECTION rebuild discipline
       teardownRequestedAt: null
     })
     await convergeDelegationBoundaryLifecycle(
-      { ...s, processPort: fakePort, liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, now: () => '2026-09-13T00:00:00Z', newId: (p: string) => `${p}_1` },
+      { ...s, processPort: fakePort, liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, durableShadowLifecycleRoot: s.durableRoot, now: () => '2026-09-13T00:00:00Z', newId: (p: string) => `${p}_1` },
       { sliceRef: SLICE }
     )
     const before = {
@@ -219,7 +219,7 @@ describe('ORCA-S4 acceptance — gate 21: synthetic-process labeling in the EVID
     labelDirs.push(dir)
     const s = setup(dir)
     const report = await convergeDelegationBoundaryLifecycle(
-      { ...s, processPort: fakePort, liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, now: () => '2026-09-13T00:00:00Z', newId: (p: string) => `${p}_1` },
+      { ...s, processPort: fakePort, liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, durableShadowLifecycleRoot: s.durableRoot, now: () => '2026-09-13T00:00:00Z', newId: (p: string) => `${p}_1` },
       { sliceRef: SLICE }
     )
     expect(report).toHaveProperty('syntheticProcessDisclaimer')

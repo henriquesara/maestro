@@ -11,15 +11,20 @@ import { makeTmpDir } from '../durable-worktree-provenance/worktree-provenance-t
 // independent-review blocker: `resolvePhase1` hardcoded `identitySidecarPath: ''`,
 // so the REAL adapter could never read the REAL sidecar on the restart-recovered
 // path — the only path any binding ever takes through this composition root,
-// since it never persists a cross-call `liveHandles` registry). Drives TWO
+// since it never persists a cross-call `liveHandles` registry). Drives THREE
 // calls through `executeShadowIdentityObservationSlice` — the SAME single
 // composition boundary S1/S2/S3 already use — against the SAME durable paths:
-// a bind call, then a restart call. Proves S4 is reached, and CONVERGES, ONLY
-// through that real path: no direct construction of `convergeDelegationBoundaryLifecycle`,
-// `ShadowLifecycleProcessAdapter`, or any S4 store as the feature-under-test
-// path (a plain SyncDatabase COUNT(*) is used only to verify rows landed,
-// after the fact — mirrors `durable-worktree-provenance.composition-root.test.ts`
-// exactly, one level up).
+// a bind call, then two restart calls. Proves S4 is reached, and CONVERGES,
+// ONLY through that real path: no direct construction of
+// `convergeDelegationBoundaryLifecycle`, `ShadowLifecycleProcessAdapter`, or
+// any S4 store as the feature-under-test path (a plain SyncDatabase COUNT(*)
+// is used only to verify rows landed, after the fact — mirrors
+// `durable-worktree-provenance.composition-root.test.ts` exactly, one level
+// up). The second restart call is required, not incidental: worktree
+// finalization for a binding with a real durable worktree is a genuine
+// two-step act (§10.2) — durable intent is recorded on the first pass that
+// reaches Phase 2, and the actual filesystem deletion + 'finalized'
+// transition happens on the NEXT pass, exactly per §12 windows L3/L4.
 //
 // RED on 94e12c2e87: the real sidecar written by the bind-time seam under
 // `<durableShadowLifecycleRoot>/process/<orcaDispatchId>.json` can never be
@@ -115,25 +120,43 @@ describe('delegated-side-effect-boundary — real production composition-root re
       .get() as { c: number }
     expect(processBindingRow.c).toBeGreaterThan(0)
 
-    // The decisive assertions: identity corroboration against the REAL
-    // sidecar must actually succeed, not fail closed into a permanent
-    // process_identity_mismatch incident.
+    // The decisive assertion for THIS blocker: identity corroboration against
+    // the REAL sidecar must actually succeed, not fail closed into a
+    // permanent process_identity_mismatch incident.
     const terminationRow = verifyDb.prepare('SELECT COUNT(*) c FROM dispatch_termination').get() as {
       c: number
     }
     expect(terminationRow.c).toBeGreaterThan(0)
 
-    const closureRow = verifyDb.prepare('SELECT COUNT(*) c FROM dispatch_lifecycle_closure').get() as {
+    // §10.2 — worktree finalization for a binding with a REAL durable
+    // worktree is a genuine two-step act: this same restart call's Phase 2
+    // only reaches 'intent_recorded' (durable intent BEFORE any filesystem
+    // deletion, §10.2 step 1); the NEXT sweep pass re-verifies the digest and
+    // performs the actual deletion + 'finalized' transition (§10.2 steps 2-4).
+    // A THIRD composition-root call is that next pass — this is the SPEC's
+    // own multi-pass design (§12 windows L3/L4), not a workaround.
+    verifyDb.close()
+    cleanups.pop()
+    const secondRestartResult = await executeShadowIdentityObservationSlice({
+      ...shared,
+      nativeResults: [nativeResult('s1')]
+    })
+    expect(secondRestartResult.delegationBoundaryLifecycle).toBeDefined()
+
+    const verifyDb2 = new SyncDatabase(executionStorePath)
+    cleanups.push(() => verifyDb2.close())
+
+    const closureRow = verifyDb2.prepare('SELECT COUNT(*) c FROM dispatch_lifecycle_closure').get() as {
       c: number
     }
     expect(closureRow.c).toBeGreaterThan(0)
 
-    const eventRow = verifyDb.prepare('SELECT COUNT(*) c FROM dispatch_lifecycle_event').get() as { c: number }
+    const eventRow = verifyDb2.prepare('SELECT COUNT(*) c FROM dispatch_lifecycle_event').get() as { c: number }
     expect(eventRow.c).toBeGreaterThan(0)
 
     // No unresolved identity-mismatch incident should have been fabricated by
     // a broken sidecar path — the real corroboration must have succeeded.
-    const mismatchIncidentRow = verifyDb
+    const mismatchIncidentRow = verifyDb2
       .prepare("SELECT COUNT(*) c FROM dispatch_lifecycle_incident WHERE kind = 'process_identity_mismatch'")
       .get() as { c: number }
     expect(mismatchIncidentRow.c).toBe(0)

@@ -122,7 +122,7 @@ describe('§12 window L1 — real self-exit with NO teardown_requested_at (real 
         ...s,
         processPort: fakePort, // real OS re-verification is the adapter's job; here the fake reports the honest "confirmed_dead_unknown_cause" classification L1 requires
         liveHandles: new Map(),
-        durableShadowWorktreeRoot: s.durableRoot,
+        durableShadowWorktreeRoot: s.durableRoot, durableShadowLifecycleRoot: s.durableRoot,
         now: () => '2026-09-13T01:00:00Z',
         newId: (p: string) => `${p}_1`
       },
@@ -163,7 +163,7 @@ describe('§12 window L2 — legitimate intermediate state, not a crash-recovery
       observedAt: '2026-09-13T00:00:00Z'
     })
     await convergeDelegationBoundaryLifecycle(
-      { ...s, processPort: fakePort, liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, now: () => '2026-09-13T01:00:00Z', newId: (p: string) => `${p}_1` },
+      { ...s, processPort: fakePort, liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, durableShadowLifecycleRoot: s.durableRoot, now: () => '2026-09-13T01:00:00Z', newId: (p: string) => `${p}_1` },
       { sliceRef: SLICE }
     )
     expect(s.finalizations.getByCorrelationId('corr_1')).toBeDefined()
@@ -227,7 +227,7 @@ describe('§12 windows L3/L4/L5 — one shared idempotent recovery path (§10.2)
     })
     // worktree already deleted (crash happened after deletion, before the UPDATE) — worktreeDirL3 is never created on disk.
     await convergeDelegationBoundaryLifecycle(
-      { ...s, processPort: fakePort, liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, now: () => '2026-09-13T01:00:00Z', newId: (p: string) => `${p}_1` },
+      { ...s, processPort: fakePort, liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, durableShadowLifecycleRoot: s.durableRoot, now: () => '2026-09-13T01:00:00Z', newId: (p: string) => `${p}_1` },
       { sliceRef: SLICE }
     )
     expect(s.finalizations.getByCorrelationId('corr_1')?.status).toBe('finalized')
@@ -290,7 +290,7 @@ describe('§12 windows L3/L4/L5 — one shared idempotent recovery path (§10.2)
       openedAt: '2026-09-13T00:00:00Z'
     })
     await convergeDelegationBoundaryLifecycle(
-      { ...s, processPort: fakePort, liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, now: () => '2026-09-13T01:00:00Z', newId: (p: string) => `${p}_1` },
+      { ...s, processPort: fakePort, liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, durableShadowLifecycleRoot: s.durableRoot, now: () => '2026-09-13T01:00:00Z', newId: (p: string) => `${p}_1` },
       { sliceRef: SLICE }
     )
     expect(existsSync(worktreeDir)).toBe(false)
@@ -340,7 +340,7 @@ describe('§12 window L6 — real signalProcessTree in flight when host crashes 
     await new Promise<void>((resolve) => child.on('exit', () => resolve()))
 
     await convergeDelegationBoundaryLifecycle(
-      { ...s, processPort: fakePort, liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, now: () => '2026-09-13T01:00:00Z', newId: (p: string) => `${p}_1` },
+      { ...s, processPort: fakePort, liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, durableShadowLifecycleRoot: s.durableRoot, now: () => '2026-09-13T01:00:00Z', newId: (p: string) => `${p}_1` },
       { sliceRef: SLICE }
     )
     const termination = s.terminations.getByCorrelationId('corr_1')
@@ -387,7 +387,7 @@ describe('§12 window L8 — duplicate finalization request across two sweep pas
       treeVerified: true,
       observedAt: '2026-09-13T00:00:00Z'
     })
-    const deps = { ...s, processPort: fakePort, liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, now: () => '2026-09-13T01:00:00Z', newId: (p: string) => `${p}_1` }
+    const deps = { ...s, processPort: fakePort, liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, durableShadowLifecycleRoot: s.durableRoot, now: () => '2026-09-13T01:00:00Z', newId: (p: string) => `${p}_1` }
     await convergeDelegationBoundaryLifecycle(deps, { sliceRef: SLICE })
     await expect(convergeDelegationBoundaryLifecycle(deps, { sliceRef: SLICE })).resolves.not.toThrow()
     const count = (
@@ -425,7 +425,7 @@ describe('§12 window L10 — SQLite write-lock not acquired within the busy bud
       }
     }
     const report = await convergeDelegationBoundaryLifecycle(
-      { ...s, processPort: busyPort, liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, now: () => '2026-09-13T01:00:00Z', newId: (p: string) => `${p}_1` },
+      { ...s, processPort: busyPort, liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, durableShadowLifecycleRoot: s.durableRoot, now: () => '2026-09-13T01:00:00Z', newId: (p: string) => `${p}_1` },
       { sliceRef: SLICE }
     )
     expect(s.terminations.getByCorrelationId('corr_1')).toBeUndefined()
@@ -466,7 +466,7 @@ describe('§12 window L11 — host restarts mid-batch, mixed per-binding progres
       spawnedAt: '2026-09-13T00:00:00Z',
       teardownRequestedAt: null
     })
-    const deps = { ...s, processPort: fakePort, liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, now: () => '2026-09-13T01:00:00Z', newId: (p: string) => `${p}_1` }
+    const deps = { ...s, processPort: fakePort, liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, durableShadowLifecycleRoot: s.durableRoot, now: () => '2026-09-13T01:00:00Z', newId: (p: string) => `${p}_1` }
     // First: only corr_advanced has a process binding, so it alone advances.
     // (corr_pending has none yet — simulating "still needs its own binding".)
     await convergeDelegationBoundaryLifecycle(deps, { sliceRef: SLICE })

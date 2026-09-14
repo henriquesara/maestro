@@ -130,7 +130,7 @@ describe('convergeDelegationBoundaryLifecycle — bare-pid-kill prevention (§20
       processNonce: 'nonce_1'
     })
     await convergeDelegationBoundaryLifecycle(
-      { ...s, processPort: port, liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, now: () => '2026-09-13T00:00:00Z', newId: (p: string) => `${p}_1` },
+      { ...s, processPort: port, liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, durableShadowLifecycleRoot: s.durableRoot, now: () => '2026-09-13T00:00:00Z', newId: (p: string) => `${p}_1` },
       { sliceRef: SLICE }
     )
     expect(calls).toHaveLength(0) // the unrelated process B is NEVER signalled
@@ -161,7 +161,7 @@ describe('convergeDelegationBoundaryLifecycle — bare-pid-kill prevention (§20
       teardownRequestedAt: null
     })
     await convergeDelegationBoundaryLifecycle(
-      { ...s, processPort: port, liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, now: () => '2026-09-13T00:00:00Z', newId: (p: string) => `${p}_1` },
+      { ...s, processPort: port, liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, durableShadowLifecycleRoot: s.durableRoot, now: () => '2026-09-13T00:00:00Z', newId: (p: string) => `${p}_1` },
       { sliceRef: SLICE }
     )
     expect(calls).toHaveLength(0)
@@ -178,7 +178,7 @@ describe('convergeDelegationBoundaryLifecycle — bare-pid-kill prevention (§20
       processNonce: 'nonce_1'
     })
     await convergeDelegationBoundaryLifecycle(
-      { ...s, processPort: port, liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, now: () => '2026-09-13T00:00:00Z', newId: (p: string) => `${p}_1` },
+      { ...s, processPort: port, liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, durableShadowLifecycleRoot: s.durableRoot, now: () => '2026-09-13T00:00:00Z', newId: (p: string) => `${p}_1` },
       { sliceRef: SLICE }
     )
     expect(calls).toHaveLength(0)
@@ -194,7 +194,7 @@ describe('convergeDelegationBoundaryLifecycle — bare-pid-kill prevention (§20
       processNonce: 'nonce_1'
     })
     await convergeDelegationBoundaryLifecycle(
-      { ...s, processPort: port, liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, now: () => '2026-09-13T00:00:00Z', newId: (p: string) => `${p}_1` },
+      { ...s, processPort: port, liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, durableShadowLifecycleRoot: s.durableRoot, now: () => '2026-09-13T00:00:00Z', newId: (p: string) => `${p}_1` },
       { sliceRef: SLICE }
     )
     expect(calls).toHaveLength(1)
@@ -215,7 +215,7 @@ describe('convergeDelegationBoundaryLifecycle — macOS compound identity, gate 
       processNonce: 'nonce_A'
     })
     await convergeDelegationBoundaryLifecycle(
-      { ...s, processPort: port, liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, now: () => '2026-09-13T00:00:00Z', newId: (p: string) => `${p}_1` },
+      { ...s, processPort: port, liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, durableShadowLifecycleRoot: s.durableRoot, now: () => '2026-09-13T00:00:00Z', newId: (p: string) => `${p}_1` },
       { sliceRef: SLICE }
     )
     expect(calls).toHaveLength(0)
@@ -235,7 +235,7 @@ describe('convergeDelegationBoundaryLifecycle — macOS compound identity, gate 
       processNonce: 'nonce_A'
     })
     await convergeDelegationBoundaryLifecycle(
-      { ...s, processPort: port, liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, now: () => '2026-09-13T00:00:00Z', newId: (p: string) => `${p}_1` },
+      { ...s, processPort: port, liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, durableShadowLifecycleRoot: s.durableRoot, now: () => '2026-09-13T00:00:00Z', newId: (p: string) => `${p}_1` },
       { sliceRef: SLICE }
     )
     expect(calls).toHaveLength(0)
@@ -255,7 +255,7 @@ describe('convergeDelegationBoundaryLifecycle — macOS compound identity, gate 
       processNonce: 'nonce_A'
     })
     await convergeDelegationBoundaryLifecycle(
-      { ...s, processPort: port, liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, now: () => '2026-09-13T00:00:00Z', newId: (p: string) => `${p}_1` },
+      { ...s, processPort: port, liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, durableShadowLifecycleRoot: s.durableRoot, now: () => '2026-09-13T00:00:00Z', newId: (p: string) => `${p}_1` },
       { sliceRef: SLICE }
     )
     expect(calls).toHaveLength(1)
@@ -275,7 +275,7 @@ describe('convergeDelegationBoundaryLifecycle — macOS compound identity, gate 
       processNonce: 'nonce_A'
     })
     const report = await convergeDelegationBoundaryLifecycle(
-      { ...s, processPort: port, liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, now: () => '2026-09-13T00:00:00Z', newId: (p: string) => `${p}_1` },
+      { ...s, processPort: port, liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, durableShadowLifecycleRoot: s.durableRoot, now: () => '2026-09-13T00:00:00Z', newId: (p: string) => `${p}_1` },
       { sliceRef: SLICE }
     )
     expect(calls).toHaveLength(0)
@@ -292,7 +292,7 @@ describe('convergeDelegationBoundaryLifecycle — macOS compound identity, gate 
       processNonce: 'nonce_A'
     })
     await convergeDelegationBoundaryLifecycle(
-      { ...s, processPort: port, liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, now: () => '2026-09-13T00:00:00Z', newId: (p: string) => `${p}_1` },
+      { ...s, processPort: port, liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, durableShadowLifecycleRoot: s.durableRoot, now: () => '2026-09-13T00:00:00Z', newId: (p: string) => `${p}_1` },
       { sliceRef: SLICE }
     )
     const incidents = s.incidents.listBySlice(SLICE)

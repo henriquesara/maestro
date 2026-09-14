@@ -171,6 +171,7 @@ export async function runShadowObservation(
         processPort: deps.delegationBoundary.processPort,
         liveHandles: deps.delegationBoundary.liveHandles,
         durableShadowWorktreeRoot: deps.worktreeProvenance.durableShadowWorktreeRoot,
+        durableShadowLifecycleRoot: deps.delegationBoundary.durableShadowLifecycleRoot,
         now: input.now,
         newId: input.newId
       },

@@ -87,7 +87,7 @@ describe('convergeDelegationBoundaryLifecycle — Phase 5 late post-closure cont
       ...s,
       processPort: fakePort,
       liveHandles: new Map(),
-      durableShadowWorktreeRoot: s.durableRoot,
+      durableShadowWorktreeRoot: s.durableRoot, durableShadowLifecycleRoot: s.durableRoot,
       now: () => '2026-09-13T00:00:00Z',
       newId: (p: string) => `${p}_1`
     }
@@ -162,7 +162,7 @@ describe('convergeDelegationBoundaryLifecycle — Phase 5 late post-closure cont
       ...s,
       processPort: fakePort,
       liveHandles: new Map(),
-      durableShadowWorktreeRoot: s.durableRoot,
+      durableShadowWorktreeRoot: s.durableRoot, durableShadowLifecycleRoot: s.durableRoot,
       now: () => '2026-09-13T00:00:00Z',
       newId: (p: string) => `${p}_1`
     }
@@ -203,7 +203,7 @@ describe('convergeDelegationBoundaryLifecycle — Phase 5 late post-closure cont
       ...s,
       processPort: fakePort,
       liveHandles: new Map(),
-      durableShadowWorktreeRoot: s.durableRoot,
+      durableShadowWorktreeRoot: s.durableRoot, durableShadowLifecycleRoot: s.durableRoot,
       now: () => '2026-09-13T00:00:00Z',
       newId: (p: string) => `${p}_1`
     }

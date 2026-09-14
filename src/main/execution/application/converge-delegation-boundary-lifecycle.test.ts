@@ -100,7 +100,7 @@ describe('convergeDelegationBoundaryLifecycle — §8.7 prospective eligibility'
     s.provenance.insert(fixtureWorktreeProvenance({ correlationId: 'corr_legacy', sliceRef: SLICE }))
 
     const report = await convergeDelegationBoundaryLifecycle(
-      { ...s, processPort: fakePort(), liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, now: () => '2026-09-13T00:00:00Z', newId: (p: string) => `${p}_1` },
+      { ...s, processPort: fakePort(), liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, durableShadowLifecycleRoot: s.durableRoot, now: () => '2026-09-13T00:00:00Z', newId: (p: string) => `${p}_1` },
       { sliceRef: SLICE }
     )
     expect(report.legacyNotLifecycleManaged).toContain('corr_legacy')
@@ -115,7 +115,7 @@ describe('convergeDelegationBoundaryLifecycle — §8.7 prospective eligibility'
       s.provenance.insert(fixtureWorktreeProvenance({ correlationId: `corr_${n}`, orcaDispatchId: `ctx_${n}`, sliceRef: SLICE }))
     }
     const report = await convergeDelegationBoundaryLifecycle(
-      { ...s, processPort: fakePort(), liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, now: () => '2026-09-13T00:00:00Z', newId: (p: string) => `${p}_1` },
+      { ...s, processPort: fakePort(), liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, durableShadowLifecycleRoot: s.durableRoot, now: () => '2026-09-13T00:00:00Z', newId: (p: string) => `${p}_1` },
       { sliceRef: SLICE }
     )
     expect(report.legacyNotLifecycleManaged.sort()).toEqual(['corr_1', 'corr_2', 'corr_3'])
@@ -130,7 +130,7 @@ describe('convergeDelegationBoundaryLifecycle — Phases 1-4 happy path', () => 
     const s = setup()
     const cid = seedEligibleBinding(s)
     const report = await convergeDelegationBoundaryLifecycle(
-      { ...s, processPort: fakePort(), liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, now: () => '2026-09-13T00:00:00Z', newId: (p: string) => `${p}_1` },
+      { ...s, processPort: fakePort(), liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, durableShadowLifecycleRoot: s.durableRoot, now: () => '2026-09-13T00:00:00Z', newId: (p: string) => `${p}_1` },
       { sliceRef: SLICE }
     )
     expect(s.terminations.getByCorrelationId(cid)).toBeDefined()
@@ -144,7 +144,7 @@ describe('convergeDelegationBoundaryLifecycle — Phases 1-4 happy path', () => 
     const s = setup()
     const cid = seedEligibleBinding(s)
     await convergeDelegationBoundaryLifecycle(
-      { ...s, processPort: fakePort(), liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, now: () => '2026-09-13T00:00:00Z', newId: (p: string) => `${p}_1` },
+      { ...s, processPort: fakePort(), liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, durableShadowLifecycleRoot: s.durableRoot, now: () => '2026-09-13T00:00:00Z', newId: (p: string) => `${p}_1` },
       { sliceRef: SLICE }
     )
     const closure = s.closures.getByCorrelationId(cid)
@@ -171,7 +171,7 @@ describe('convergeDelegationBoundaryLifecycle — §14 LIFE-9 incident isolation
       raisedAt: '2026-09-13T00:00:00Z'
     })
     await convergeDelegationBoundaryLifecycle(
-      { ...s, processPort: fakePort(), liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, now: () => '2026-09-13T00:00:00Z', newId: (p: string) => `${p}_1` },
+      { ...s, processPort: fakePort(), liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, durableShadowLifecycleRoot: s.durableRoot, now: () => '2026-09-13T00:00:00Z', newId: (p: string) => `${p}_1` },
       { sliceRef: SLICE }
     )
     expect(s.terminations.getByCorrelationId(cid)).toBeUndefined() // Phase 1 skipped for this binding
@@ -194,7 +194,7 @@ describe('convergeDelegationBoundaryLifecycle — §13 retryables never become s
       }
     })
     const report = await convergeDelegationBoundaryLifecycle(
-      { ...s, processPort: flakyPort, liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, now: () => '2026-09-13T00:00:00Z', newId: (p: string) => `${p}_1` },
+      { ...s, processPort: flakyPort, liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, durableShadowLifecycleRoot: s.durableRoot, now: () => '2026-09-13T00:00:00Z', newId: (p: string) => `${p}_1` },
       { sliceRef: SLICE }
     )
     expect(s.terminations.getByCorrelationId(cid)).toBeUndefined()
@@ -211,7 +211,7 @@ describe('convergeDelegationBoundaryLifecycle — §13 retryables never become s
       }
     })
     const report = await convergeDelegationBoundaryLifecycle(
-      { ...s, processPort: busyPort, liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, now: () => '2026-09-13T00:00:00Z', newId: (p: string) => `${p}_1` },
+      { ...s, processPort: busyPort, liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, durableShadowLifecycleRoot: s.durableRoot, now: () => '2026-09-13T00:00:00Z', newId: (p: string) => `${p}_1` },
       { sliceRef: SLICE }
     )
     expect(s.incidents.listBySlice(SLICE)).toHaveLength(0)
@@ -223,7 +223,7 @@ describe('convergeDelegationBoundaryLifecycle — §11 fixed-point / idempotent 
   it('running the sweep 3x back-to-back on unchanged durable state is semantically equivalent to running it once: zero duplicate rows, zero extra incidents', async () => {
     const s = setup()
     const cid = seedEligibleBinding(s)
-    const deps = { ...s, processPort: fakePort(), liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, now: () => '2026-09-13T00:00:00Z', newId: (p: string) => `${p}_1` }
+    const deps = { ...s, processPort: fakePort(), liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, durableShadowLifecycleRoot: s.durableRoot, now: () => '2026-09-13T00:00:00Z', newId: (p: string) => `${p}_1` }
     await convergeDelegationBoundaryLifecycle(deps, { sliceRef: SLICE })
     await convergeDelegationBoundaryLifecycle(deps, { sliceRef: SLICE })
     await convergeDelegationBoundaryLifecycle(deps, { sliceRef: SLICE })
@@ -248,7 +248,7 @@ describe('convergeDelegationBoundaryLifecycle — §14 LIFE-8 hooks are wake-up 
     const durableResultFor = async (hookFireCount: number) => {
       const s = setup()
       const cid = seedEligibleBinding(s)
-      const deps = { ...s, processPort: fakePort(), liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, now: () => '2026-09-13T00:00:00Z', newId: (p: string) => `${p}_1` }
+      const deps = { ...s, processPort: fakePort(), liveHandles: new Map(), durableShadowWorktreeRoot: s.durableRoot, durableShadowLifecycleRoot: s.durableRoot, now: () => '2026-09-13T00:00:00Z', newId: (p: string) => `${p}_1` }
       for (let i = 0; i < Math.max(1, hookFireCount); i += 1) {
         await convergeDelegationBoundaryLifecycle(deps, { sliceRef: SLICE })
       }

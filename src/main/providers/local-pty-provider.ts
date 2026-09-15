@@ -70,6 +70,14 @@ export class LocalPtyProvider implements IPtyProvider {
     return spawnLocalPty(args, () => this.opts)
   }
 
+  // The local provider honors deferDelegatedCommandDelivery end-to-end
+  // (local-pty-launch-plan.ts) and awaits the spawn-commit seam before
+  // activateLocalPtySession ever runs (local-pty-spawn.ts) -- the full
+  // SPEC.md §7.3 prerequisite this capability attests to.
+  supportsDelegatedCutoverHold(): boolean {
+    return true
+  }
+
   // Local PTYs are always attached -- no-op. Remote providers use this to resubscribe.
   async attach(_id: string): Promise<void> {}
   hasPty(id: string): boolean {

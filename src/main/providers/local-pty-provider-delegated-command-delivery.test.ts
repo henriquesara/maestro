@@ -1,5 +1,11 @@
-// PRE_IMPLEMENTATION RED baseline for orca-delegated-cutover SPEC.md §4.1a
+// GREEN evidence for orca-delegated-cutover SPEC.md §4.1a
 // (`DELEGATED_DEFERRED_COMMAND_DELIVERY`) and gates 41, 42, 49, 55.
+//
+// History: started RED (commit 0a1bf4c265) -- `deferDelegatedCommandDelivery`
+// did not exist and had zero effect on argv. The GREEN implementation
+// session threaded it through `PtySpawnOptions` and
+// `createWindowsLocalPtyLaunchPlan` (local-pty-launch-plan.ts), forcing the
+// codebase's own existing "command not embeddable" branch unconditionally.
 //
 // This file proves, against the REAL `LocalPtyProvider.spawn()` path (only
 // `node-pty`, `fs`, `electron`, and the PowerShell-executable resolver are
@@ -7,17 +13,15 @@
 // `createWindowsLocalPtyLaunchPlan` / `resolveWindowsShellLaunchArgs`, is
 // real and unmocked), that:
 //
-//   1. A `deferDelegatedCommandDelivery` option does not exist on
-//      `PtySpawnOptions` today, and even when force-cast onto a spawn call
-//      has zero effect: the delegated agent's startup command still lands in
-//      the spawned process's argv for the real default Windows PowerShell
-//      path and for the cmd.exe path (RED for gate 41/42/55).
-//   2. `startupCommandDeliveredInShellArgs` is therefore still `true` for a
-//      "delegated" spawn today -- the corrected §4.1a contract does not
-//      exist yet (RED for gate 42).
+//   1. `deferDelegatedCommandDelivery: true` now keeps the delegated
+//      agent's startup command out of the spawned process's argv, for both
+//      the real default Windows PowerShell path and the cmd.exe path
+//      (GREEN for gate 41/42/55).
+//   2. `startupCommandDeliveredInShellArgs` is therefore false/absent for a
+//      delegated spawn (GREEN for gate 42).
 //   3. Ordinary (non-delegated) spawns keep embedding a short startup
-//      command in argv exactly as today, unaffected (positive control for
-//      Area B / additive-change requirement).
+//      command in argv exactly as before -- unaffected, purely additive
+//      (positive control for Area B).
 //
 // Mirrors the mocking discipline of `local-pty-provider-windows-shell-launch.test.ts`
 // (the file the frozen SPEC itself cites for the real default Windows path).
@@ -134,7 +138,7 @@ import {
 
 const DELEGATED_MARKER = 'orca-delegated-agent-invoke --claim-token=__SPEC_4_1A_RED_MARKER__'
 
-describe('LocalPtyProvider: delegated command delivery (SPEC §4.1a, gates 41/42/49/55, RED)', () => {
+describe('LocalPtyProvider: delegated command delivery (SPEC §4.1a, gates 41/42/49/55, GREEN)', () => {
   let provider: LocalPtyProvider
   let mockProc: LocalPtyMockProcess
   let exitCb: ((info: { exitCode: number }) => void) | undefined
@@ -187,8 +191,8 @@ describe('LocalPtyProvider: delegated command delivery (SPEC §4.1a, gates 41/42
   }
 
   it(
-    'RED (gate 41/55): real default Windows PowerShell path still embeds the delegated ' +
-      'command in argv even with deferDelegatedCommandDelivery set',
+    'GREEN (gate 41/55): real default Windows PowerShell path keeps the delegated ' +
+      'command out of argv when deferDelegatedCommandDelivery is set',
     async () => {
       // Why: mirrors the settings layer's own real default (PowerShell), not
       // this dev machine's COMSPEC -- same convention as the existing
@@ -203,12 +207,12 @@ describe('LocalPtyProvider: delegated command delivery (SPEC §4.1a, gates 41/42
       expect(spawnCall[0]).toBe(WINDOWS_POWERSHELL_ABS)
       const encoded = spawnCall[1][3] as string
       const decoded = Buffer.from(encoded, 'base64').toString('utf16le')
-      // FROZEN CONTRACT (§4.1a): this must be false/absent. Fails today.
+      // FROZEN CONTRACT (§4.1a): GREEN -- false/absent.
       expect(decoded).not.toContain(DELEGATED_MARKER)
     }
   )
 
-  it('RED (gate 42): startupCommandDeliveredInShellArgs is still true for PowerShell today', async () => {
+  it('GREEN (gate 42): startupCommandDeliveredInShellArgs is false/absent for PowerShell', async () => {
     provider.configure({
       getWindowsShell: () => 'powershell.exe',
       getWindowsPowerShellImplementation: () => 'powershell.exe'
@@ -225,7 +229,7 @@ describe('LocalPtyProvider: delegated command delivery (SPEC §4.1a, gates 41/42
     expect(result.id).toBeTruthy()
   })
 
-  it('RED (gate 41/42): real cmd.exe path still embeds the delegated command in /K argv', async () => {
+  it('GREEN (gate 41/42): real cmd.exe path keeps the delegated command out of the /K argv', async () => {
     provider.configure({ getWindowsShell: () => 'cmd.exe' })
 
     await spawnWithDeferredDelivery()
@@ -233,7 +237,7 @@ describe('LocalPtyProvider: delegated command delivery (SPEC §4.1a, gates 41/42
     const spawnCall = spawnMock.mock.calls.at(-1)!
     expect(spawnCall[0]).toBe('cmd.exe')
     const shellArgs = spawnCall[1] as string[]
-    // FROZEN CONTRACT (§4.1a): must never appear in the /K argument. Fails today.
+    // FROZEN CONTRACT (§4.1a): GREEN -- never appears in the /K argument.
     expect(shellArgs.join(' ')).not.toContain(DELEGATED_MARKER)
   })
 

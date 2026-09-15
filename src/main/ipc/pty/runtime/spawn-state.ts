@@ -15,6 +15,7 @@ import type {
   AgentSessionSurfaceBinding
 } from '../../../../shared/agent-session-host-authority'
 import { localProvider } from '../provider/registry'
+import type { DelegationCutoverCommitResult } from '../../../../shared/delegation-cutover-commit-result'
 
 export type RuntimePtySpawnState = {
   deps: PtyRuntimeControllerDeps
@@ -77,7 +78,7 @@ export type RuntimePtySpawnState = {
   snapshotKittyFlagsCoverReconciledSeq: boolean
   preparedProvisionalExecutionContext: boolean
   releaseWorktreeSpawn: (() => void) | undefined
-  reportPtySpawnCommitted: () => void
+  reportPtySpawnCommitted: () => Promise<DelegationCutoverCommitResult | void>
 }
 
 export type RuntimePtySpawnArgs = {
@@ -112,7 +113,11 @@ export type RuntimePtySpawnArgs = {
   }
   agentSessionCreateOperationId?: string
   signal?: AbortSignal
-  onPtySpawnCommitted?: () => void
+  onPtySpawnCommitted?: () => Promise<DelegationCutoverCommitResult> | void
+  /** SPEC.md §4.1a: forces argv-embedding off for this spawn's Windows
+   *  local-provider launch plan, unconditionally. Additive -- absent for
+   *  every existing caller. */
+  deferDelegatedCommandDelivery?: boolean
   adoptedStablePane?: {
     result: PtySpawnResult
     owner: {
@@ -180,6 +185,9 @@ export function createRuntimePtySpawnState(
     snapshotKittyFlagsCoverReconciledSeq: true,
     preparedProvisionalExecutionContext: false,
     releaseWorktreeSpawn: undefined,
-    reportPtySpawnCommitted: () => {}
+    // Already-resolved no-op placeholder; buildRuntimePtySpawnOptions always
+    // replaces this with the real async-aware guard before any real spawn
+    // logic runs (site #10).
+    reportPtySpawnCommitted: async () => {}
   }
 }

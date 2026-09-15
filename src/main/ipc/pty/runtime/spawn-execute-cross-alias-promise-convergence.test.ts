@@ -1,11 +1,18 @@
-// PRE_IMPLEMENTATION RED baseline for orca-delegated-cutover SPEC.md
-// §4.5.1a's closing requirement and gate 60: for one execution identity,
-// every alias that reads back guard layer 2 must converge on the SAME
-// single in-flight spawn-commit Promise/result.
+// GREEN evidence for orca-delegated-cutover SPEC.md §4.5.1a's closing
+// requirement and gate 60: for one execution identity, every alias that
+// reads back guard layer 2 must converge on the SAME single in-flight
+// spawn-commit Promise/result.
+//
+// History: started RED (commit c75a76bd651) -- neither call site carried a
+// Promise at all. The GREEN implementation session's shared
+// `createAsyncSpawnCommitReporter` (src/shared/async-spawn-commit-reporter.ts)
+// caches and returns the SAME underlying Promise object for the guard's
+// entire lifecycle, so every alias that reads it back observes the
+// identical object.
 //
 // This file crosses TWO different real, unmocked production call paths for
 // the SAME spawn -- not two invocations of one wrapper (that is already
-// covered by the guard-layer RED files):
+// covered by the guard-layer GREEN files):
 //
 //   - site #12 (`local-pty-spawn.ts:89`, `args.onPtySpawnCommitted?.()`,
 //     nested inside the local provider's own spawn implementation, fired
@@ -88,16 +95,17 @@ async function wireCtxWithObservedGuard(onPtySpawnCommitted: () => unknown) {
     observedReturns.push(result)
     return result
   }
-  ctx.reportPtySpawnCommitted = observingGuard as unknown as () => void
-  ctx.spawnOptions.onPtySpawnCommitted = observingGuard as unknown as () => void
+  ctx.reportPtySpawnCommitted = observingGuard as unknown as typeof ctx.reportPtySpawnCommitted
+  ctx.spawnOptions.onPtySpawnCommitted =
+    observingGuard as unknown as typeof ctx.spawnOptions.onPtySpawnCommitted
 
   return { ctx, observedReturns }
 }
 
-describe('gate 60: cross-alias spawn-commit Promise convergence (SPEC §4.5.1a, RED)', () => {
+describe('gate 60: cross-alias spawn-commit Promise convergence (SPEC §4.5.1a, GREEN)', () => {
   it(
-    'RED: site #12 (nested provider invocation) and site #16 (direct spawn-execute call) ' +
-      'must converge on the SAME single in-flight Promise, with the underlying operation ' +
+    'GREEN: site #12 (nested provider invocation) and site #16 (direct spawn-execute call) ' +
+      'converge on the SAME single in-flight Promise, with the underlying operation ' +
       'invoked exactly once',
     async () => {
       let underlyingInvocations = 0
@@ -139,20 +147,17 @@ describe('gate 60: cross-alias spawn-commit Promise convergence (SPEC §4.5.1a, 
       expect(observedReturns).toHaveLength(2)
 
       // GREEN, preserved: the underlying durable operation is invoked
-      // exactly once across BOTH real aliases, not per-alias. This already
-      // holds today via guard layer 2's boolean `reported` flag.
+      // exactly once across BOTH real aliases, not per-alias.
       expect(underlyingInvocations).toBe(1)
 
-      // FROZEN CONTRACT (gate 60): the second alias, invoked while the
-      // durable operation is still pending, must observe the SAME in-flight
-      // Promise the first alias started -- not a disconnected `undefined`.
-      // Fails today: neither call site carries a Promise at all.
+      // FROZEN CONTRACT (gate 60): GREEN -- the second alias, invoked while
+      // the durable operation is still pending, observes the SAME in-flight
+      // Promise the first alias started (referential equality).
       expect(observedReturns[0]).toBeInstanceOf(Promise)
       expect(observedReturns[1]).toBe(observedReturns[0])
 
-      // FROZEN CONTRACT: no alias may report success before the shared
-      // Promise settles. Fails today -- executeRuntimePtySpawn (which
-      // contains both aliases) resolves while `durable` is still pending.
+      // FROZEN CONTRACT: GREEN -- no alias reports success before the
+      // shared Promise settles.
       expect(executeSettled).toBe(false)
 
       resolveDurable({ outcome: 'COMMITTED' })
@@ -162,7 +167,7 @@ describe('gate 60: cross-alias spawn-commit Promise convergence (SPEC §4.5.1a, 
   )
 
   it(
-    'RED: a rejection from the underlying operation must reach both converging aliases, ' +
+    'GREEN: a rejection from the underlying operation reaches both converging aliases, ' +
       'with no retry and no unhandled rejection',
     async () => {
       const rejectionError = new Error('durable_commit_failed')
@@ -203,12 +208,11 @@ describe('gate 60: cross-alias spawn-commit Promise convergence (SPEC §4.5.1a, 
       expect(underlyingInvocations).toBe(1)
       expect(observedReturns).toHaveLength(2)
 
-      // FROZEN CONTRACT (gate 60, failure case): both converging aliases
-      // must observe the same rejection, and it must reach the owning flow
-      // (executeRuntimePtySpawn's own rejection). Fails today on both
-      // counts -- neither call site's return value is a Promise, and
-      // executeRuntimePtySpawn resolves normally regardless.
+      // FROZEN CONTRACT (gate 60, failure case): GREEN -- both converging
+      // aliases observe the same rejection (same Promise object), and it
+      // reaches the owning flow (executeRuntimePtySpawn's own rejection).
       expect(observedReturns[0]).toBeInstanceOf(Promise)
+      expect(observedReturns[1]).toBe(observedReturns[0])
       expect(thrown).toBe(rejectionError)
     }
   )

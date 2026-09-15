@@ -14,6 +14,7 @@ import {
 import { ptyIncarnationById, ptyOwnership } from '../provider/ownership-state'
 import { isHostReportedPtyAbsenceError, isObservedPtyExitEvidence } from '../provider/liveness'
 import { clearProviderPtyState } from '../provider/state-cleanup'
+import type { DelegationCutoverCommitResult } from '../../../../shared/delegation-cutover-commit-result'
 
 export type StablePaneOwner = {
   handle?: string
@@ -166,7 +167,7 @@ export type StablePaneSpawnContext = {
   worktreeId?: string
   connectionId?: string | null
   resolveOwner?: () => StablePaneOwner | null
-  onFreshSpawn?: (result: PtySpawnResult) => void
+  onFreshSpawn?: (result: PtySpawnResult) => Promise<DelegationCutoverCommitResult | void> | void
 }
 
 export function stablePanePersistenceFence(
@@ -299,6 +300,6 @@ export async function spawnForStablePane(
     }
   }
   const result = await args.provider.spawn(args.spawnOptions)
-  args.onFreshSpawn?.(result)
+  await args.onFreshSpawn?.(result)
   return { result, owner: null }
 }

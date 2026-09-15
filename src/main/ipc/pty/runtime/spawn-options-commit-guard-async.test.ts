@@ -1,12 +1,15 @@
-// PRE_IMPLEMENTATION RED baseline for orca-delegated-cutover SPEC.md §4.5.1
-// sites #10/#11 (`spawn-options.ts`'s inline guard, "guard layer 2") and
-// §4.5.2's async-aware fire-once contract. Gates 44, 45, 46, 47, 48, 61.
+// GREEN evidence for orca-delegated-cutover SPEC.md §4.5.1 sites #10/#11
+// (`spawn-options.ts`'s inline guard, "guard layer 2") and §4.5.2's
+// async-aware fire-once contract. Gates 44, 45, 46, 47, 48, 61.
+//
+// History: started RED (commit 0a1bf4c265) -- the inline guard was
+// `(): void => { ...; args.onPtySpawnCommitted?.() }`: fire-once, but not
+// async-aware. The GREEN implementation session replaced it with the same
+// shared `createAsyncSpawnCommitReporter` guard layer 1 uses
+// (src/shared/async-spawn-commit-reporter.ts).
 //
 // Exercises the REAL `buildRuntimePtySpawnOptions` (the exact function
-// production calls) against a minimal `RuntimePtySpawnState`, and proves
-// `ctx.reportPtySpawnCommitted` -- the closure sites #12/#16/#17 all read
-// back -- is still `(): void => { ...; args.onPtySpawnCommitted?.() }`
-// today: fire-once, but not async-aware.
+// production calls) against a minimal `RuntimePtySpawnState`.
 
 import { describe, expect, it, vi } from 'vitest'
 import { LocalPtyProvider } from '../../../providers/local-pty-provider'
@@ -22,17 +25,16 @@ function makeCtx(onPtySpawnCommitted: () => unknown) {
   const args = {
     cols: 80,
     rows: 24,
-    // Why cast: onPtySpawnCommitted is typed `() => void` today -- the exact
-    // narrowness this RED baseline exists to prove.
-    onPtySpawnCommitted: onPtySpawnCommitted as unknown as () => void
+    onPtySpawnCommitted:
+      onPtySpawnCommitted as unknown as RuntimePtySpawnArgs['onPtySpawnCommitted']
   } as unknown as RuntimePtySpawnArgs
   const ctx = createRuntimePtySpawnState(deps, args)
   ctx.provider = new LocalPtyProvider()
   return ctx
 }
 
-describe('buildRuntimePtySpawnOptions commit guard (SPEC §4.5.1 sites #10/#11, RED)', () => {
-  it('RED (gate 44): ctx.reportPtySpawnCommitted must return a Promise, not void', async () => {
+describe('buildRuntimePtySpawnOptions commit guard (SPEC §4.5.1 sites #10/#11, GREEN)', () => {
+  it('GREEN (gate 44): ctx.reportPtySpawnCommitted returns a Promise, not bare void', async () => {
     let settled = false
     const ctx = makeCtx(() => {
       return Promise.resolve().then(() => {
@@ -43,14 +45,14 @@ describe('buildRuntimePtySpawnOptions commit guard (SPEC §4.5.1 sites #10/#11, 
     await buildRuntimePtySpawnOptions(ctx)
     const returned = ctx.reportPtySpawnCommitted()
 
-    // FROZEN CONTRACT (§4.5.1 site #10): must return
-    // Promise<DelegationCutoverCommitResult | void>. Fails today.
+    // FROZEN CONTRACT (§4.5.1 site #10): GREEN -- returns
+    // Promise<DelegationCutoverCommitResult | void>.
     expect(returned).toBeInstanceOf(Promise)
     await (returned as unknown as Promise<unknown>)
     expect(settled).toBe(true)
   })
 
-  it('RED (gate 46): duplicate invocation while in-flight must return the SAME in-flight Promise', async () => {
+  it('GREEN (gate 46): duplicate invocation while in-flight returns the SAME in-flight Promise', async () => {
     let resolveUnderlying!: () => void
     const underlying = new Promise<void>((resolve) => {
       resolveUnderlying = resolve
@@ -61,7 +63,7 @@ describe('buildRuntimePtySpawnOptions commit guard (SPEC §4.5.1 sites #10/#11, 
     const first = ctx.reportPtySpawnCommitted()
     const second = ctx.reportPtySpawnCommitted()
 
-    // FROZEN CONTRACT (§4.5.2): fails today -- both calls return `undefined`.
+    // FROZEN CONTRACT (§4.5.2): GREEN -- both calls return the same object.
     expect(first).toBeInstanceOf(Promise)
     expect(first).toBe(second)
 
@@ -69,22 +71,20 @@ describe('buildRuntimePtySpawnOptions commit guard (SPEC §4.5.1 sites #10/#11, 
     await underlying
   })
 
-  it('RED (gate 11): threads the SAME async-capable guard into ctx.spawnOptions.onPtySpawnCommitted', async () => {
+  it('GREEN (gate 11): threads the SAME async-capable guard into ctx.spawnOptions.onPtySpawnCommitted', async () => {
     const ctx = makeCtx(() => Promise.resolve())
 
     await buildRuntimePtySpawnOptions(ctx)
 
-    // Site #11's own wiring already threads ctx.reportPtySpawnCommitted through
-    // unconditionally (this part is real and correct today) -- the RED is
-    // that the threaded closure is still void-returning.
+    // Site #11's own wiring threads ctx.reportPtySpawnCommitted through
+    // unconditionally (real and correct since before this seam's RED
+    // baseline) -- GREEN adds that the threaded closure is now awaitable.
     expect(ctx.spawnOptions.onPtySpawnCommitted).toBe(ctx.reportPtySpawnCommitted)
     const threadedResult = ctx.spawnOptions.onPtySpawnCommitted?.()
-    // FROZEN CONTRACT: the threaded closure local-pty-spawn.ts:89 calls must
-    // itself be awaitable. Fails today.
     expect(threadedResult).toBeInstanceOf(Promise)
   })
 
-  it('RED (gate 48/61): a rejection from the real callback must reject the guard, not be discarded', async () => {
+  it('GREEN (gate 48/61): a rejection from the real callback rejects the guard, is never discarded', async () => {
     const rejectionError = new Error('durable_commit_failed')
     let capturedPromise: Promise<void> | undefined
     const ctx = makeCtx(() => {
@@ -96,12 +96,12 @@ describe('buildRuntimePtySpawnOptions commit guard (SPEC §4.5.1 sites #10/#11, 
     const returned = ctx.reportPtySpawnCommitted()
     await capturedPromise?.catch(() => {})
 
-    // FROZEN CONTRACT: fails today -- `returned` is `undefined`.
+    // FROZEN CONTRACT: GREEN -- `returned` rejects with this exact error.
     expect(returned).toBeInstanceOf(Promise)
     await expect(returned as unknown as Promise<unknown>).rejects.toBe(rejectionError)
   })
 
-  it('invariant preserved (not RED): the underlying callback still fires exactly once across duplicates', async () => {
+  it('invariant preserved: the underlying callback still fires exactly once across duplicates', async () => {
     const callback = vi.fn()
     const ctx = makeCtx(callback)
 

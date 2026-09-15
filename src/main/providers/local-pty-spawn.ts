@@ -86,7 +86,21 @@ export async function spawnLocalPty(
       : undefined,
     windowsFallbackAttempts: plan.windowsFallbackAttempts
   })
-  args.onPtySpawnCommitted?.()
+  // Why `if` + await, not a bare `await args.onPtySpawnCommitted?.()`: an
+  // `await` always yields at least one microtask tick even when its operand
+  // is `undefined` -- a real, observable timing change for every spawn that
+  // never sets this callback (the ordinary/native majority, including
+  // concurrent same-session-id coalescing races, which depend on exact
+  // synchronous-vs-microtask ordering). Skipping the await entirely when
+  // the callback is absent preserves that ordering byte-for-byte. When
+  // present, this is the seam SPEC.md §4.3 freezes as the authoritative
+  // durable-commit boundary: it blocks activateLocalPtySession -- and
+  // therefore any workload delivery -- until the durable commit settles; a
+  // rejection here propagates out of spawnLocalPty and
+  // activateLocalPtySession is never reached.
+  if (args.onPtySpawnCommitted) {
+    await args.onPtySpawnCommitted()
+  }
   plan.shellPath = spawnResult.shellPath
   // Why: a Windows fallback embeds its startup command in argv; honor the winning shell's delivery flag to avoid a double write.
   if (spawnResult.startupCommandDeliveredInShellArgs !== undefined) {

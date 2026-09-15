@@ -176,7 +176,11 @@ export class OrcaRuntimeWithCreateTerminal extends OrcaRuntimeWithTerminalCreate
           releaseStablePaneCreate?.()
         }
         if (!result.stablePaneOwner) {
-          reportPtySpawnCommitted()
+          // Why await: guard layer 1's own cache means this is always a
+          // duplicate-after-settled (or still in-flight) read for a
+          // local-PTY spawn, never a fresh attempt -- but it must still
+          // never be a floating, unobserved Promise (SPEC.md §4.5.1 site #9).
+          await reportPtySpawnCommitted()
         }
         const adoptedStablePane = Boolean(result.stablePaneOwner)
         if (result.agentSessionEnsure) {

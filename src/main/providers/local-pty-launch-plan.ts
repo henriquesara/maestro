@@ -151,12 +151,18 @@ function createWindowsLocalPtyLaunchPlan(
         : shellFamily
     }
     // Why: bare `pwsh.exe` resolves to the Store App Execution Alias stub whose spawn fails (code 5); use an absolute exe + cmd.exe fallback.
+    // Why deferDelegatedCommandDelivery withholds the command here (SPEC.md
+    // §4.1a): forces getCmdShellArgStartupCommand/getPowerShellEncodedCommand's
+    // own existing "no startup command" branch unconditionally, so the
+    // workload command never reaches argv for a delegated spawn, regardless
+    // of length/content -- the real, full command is still available on
+    // `args.command` for writeStartupCommandWhenShellReady to deliver later.
     const windowsFallbackAttempts = buildWindowsPowerShellSpawnAttempts({
       shellPath,
       cwd,
       defaultCwd,
       wslContext: seed.launchWslContext,
-      startupCommand: args.command
+      startupCommand: args.deferDelegatedCommandDelivery ? undefined : args.command
     })
     const primaryAttempt = windowsFallbackAttempts[0]
     if (primaryAttempt) {
@@ -174,7 +180,7 @@ function createWindowsLocalPtyLaunchPlan(
       cwd,
       defaultCwd,
       seed.launchWslContext,
-      args.command
+      args.deferDelegatedCommandDelivery ? undefined : args.command
     )
     return finalizeLocalPtyLaunchPlan(seed, {
       shellPath,

@@ -1,12 +1,13 @@
-// PRE_IMPLEMENTATION RED baseline for orca-delegated-cutover SPEC.md §7.3
-// (provider eligibility gate, `supportsDelegatedCutoverHold`). Gates 52, 53.
+// GREEN evidence for orca-delegated-cutover SPEC.md §7.3 (provider
+// eligibility gate, `supportsDelegatedCutoverHold`). Gates 52, 53.
 //
-// Neither the capability nor the gate check exists anywhere in the
-// repository today (confirmed by symbol search against `pty-provider-contract.ts`
-// and `local-pty-provider.ts` during this session's re-derivation, §2).
-// These tests exercise the REAL `buildRuntimePtySpawnOptions` and prove a
-// provider lacking the capability is never rejected before a spawn would be
-// allowed to proceed.
+// History: started RED (commit c75a76bd651) -- neither the capability nor
+// the gate check existed. The GREEN implementation session added
+// `IPtyProvider.supportsDelegatedCutoverHold`, `LocalPtyProvider`'s own
+// `true` declaration, and the fail-closed check in
+// `buildRuntimePtySpawnOptions`. These tests now exercise the REAL
+// production code and assert the frozen contract holds (see
+// PREIMPLEMENTATION-GREEN-EVIDENCE.md).
 
 import { describe, expect, it, vi } from 'vitest'
 import { LocalPtyProvider } from '../../../providers/local-pty-provider'
@@ -24,20 +25,14 @@ function makeCtx(args: Partial<RuntimePtySpawnArgs>) {
   return createRuntimePtySpawnState(deps, fullArgs)
 }
 
-describe('delegated-cutover provider eligibility gate (SPEC §7.3, RED)', () => {
-  it('RED (gate 52): a provider without supportsDelegatedCutoverHold is not rejected before cutover', async () => {
+describe('delegated-cutover provider eligibility gate (SPEC §7.3, GREEN)', () => {
+  it('GREEN (gate 52): a provider without supportsDelegatedCutoverHold is rejected before cutover', async () => {
     const stubProvider = {
       spawn: vi.fn()
       // Deliberately does not declare supportsDelegatedCutoverHold.
     } as unknown as IPtyProvider
 
-    const ctx = makeCtx({
-      // Why cast: deferDelegatedCommandDelivery does not exist on
-      // PtySpawnOptions/RuntimePtySpawnArgs yet -- it is this seam's own
-      // delegated-spawn indicator (§4.1a/§18.1), reused here as the trigger
-      // §7.3's gate must key off.
-      deferDelegatedCommandDelivery: true
-    } as never)
+    const ctx = makeCtx({ deferDelegatedCommandDelivery: true } as never)
     ctx.provider = stubProvider
 
     let thrown: unknown
@@ -47,25 +42,69 @@ describe('delegated-cutover provider eligibility gate (SPEC §7.3, RED)', () => 
       thrown = error
     }
 
-    // FROZEN CONTRACT (§7.3): must throw
-    // `delegated_cutover_provider_unsupported` before any spawn is allowed
-    // to proceed. Fails today -- the gate does not exist, so nothing throws.
+    // FROZEN CONTRACT (§7.3): throws `delegated_cutover_provider_unsupported`
+    // before any spawn is allowed to proceed -- no fence acquired, no
+    // process prepared.
     expect((thrown as Error | undefined)?.message).toBe('delegated_cutover_provider_unsupported')
     expect(stubProvider.spawn).not.toHaveBeenCalled()
   })
 
+  it('GREEN (gate 52): a provider declaring supportsDelegatedCutoverHold === true is not rejected', async () => {
+    const stubProvider = {
+      spawn: vi.fn(),
+      supportsDelegatedCutoverHold: () => true
+    } as unknown as IPtyProvider
+
+    const ctx = makeCtx({ deferDelegatedCommandDelivery: true } as never)
+    ctx.provider = stubProvider
+
+    await expect(buildRuntimePtySpawnOptions(ctx)).resolves.not.toThrow()
+  })
+
+  it('GREEN (gate 52): a provider explicitly declaring the capability false is rejected, same as absent', async () => {
+    const stubProvider = {
+      spawn: vi.fn(),
+      supportsDelegatedCutoverHold: () => false
+    } as unknown as IPtyProvider
+
+    const ctx = makeCtx({ deferDelegatedCommandDelivery: true } as never)
+    ctx.provider = stubProvider
+
+    let thrown: unknown
+    try {
+      await buildRuntimePtySpawnOptions(ctx)
+    } catch (error) {
+      thrown = error
+    }
+    expect((thrown as Error | undefined)?.message).toBe('delegated_cutover_provider_unsupported')
+  })
+
+  it('GREEN: a non-delegated spawn (deferDelegatedCommandDelivery unset) never consults the capability at all', async () => {
+    const supportsDelegatedCutoverHold = vi.fn(() => false)
+    const stubProvider = { spawn: vi.fn(), supportsDelegatedCutoverHold } as unknown as IPtyProvider
+
+    const ctx = makeCtx({})
+    ctx.provider = stubProvider
+
+    await expect(buildRuntimePtySpawnOptions(ctx)).resolves.not.toThrow()
+    expect(supportsDelegatedCutoverHold).not.toHaveBeenCalled()
+  })
+
   it(
-    'RED (gate 52, fail-closed positive control): the check must never invoke the provider ' +
-      'spawn before deciding eligibility, even when eligible',
+    "GREEN (gate 52, real provider): LocalPtyProvider -- this slice's only eligible provider -- " +
+      'declares the capability true, and a delegated spawn against it is never rejected',
     async () => {
-      // LocalPtyProvider is this slice's only eligible provider (§7.3) --
-      // but it does not declare the capability yet either (confirmed below),
-      // so this documents the gate's absence rather than its correctness.
       const provider = new LocalPtyProvider()
       expect(
-        (provider as unknown as { supportsDelegatedCutoverHold?: unknown })
-          .supportsDelegatedCutoverHold
-      ).toBeUndefined()
+        (
+          provider as unknown as { supportsDelegatedCutoverHold: () => boolean }
+        ).supportsDelegatedCutoverHold()
+      ).toBe(true)
+
+      const ctx = makeCtx({ deferDelegatedCommandDelivery: true } as never)
+      ctx.provider = provider
+
+      await expect(buildRuntimePtySpawnOptions(ctx)).resolves.not.toThrow()
     }
   )
 })

@@ -1,7 +1,10 @@
-// PRE_IMPLEMENTATION RED baseline for orca-delegated-cutover SPEC.md §4.5.1
-// sites #16/#17 (`spawn-execute.ts`) and, via the real `spawnForStablePane`
-// it calls, site #19 (`stable-owner.ts`). Gates 47, 57, 59, 61, 62, plus
-// Areas G/H/K/L (bare, unawaited direct/forwarded calls to guard layer 2).
+// GREEN evidence for orca-delegated-cutover SPEC.md §4.5.1 sites #16/#17
+// (`spawn-execute.ts`) and, via the real `spawnForStablePane` it calls, site
+// #19 (`stable-owner.ts`). Gates 47, 57, 59, 61, 62, plus Areas G/H/K/L.
+//
+// History: started RED (commit 0a1bf4c265) -- both calls were bare and
+// unawaited. The GREEN implementation session added `await` at
+// `spawn-execute.ts:88` (site #16) and `stable-owner.ts:302` (site #19).
 //
 // `executeRuntimePtySpawn` is exercised for real; only the agent-session
 // owner registry (a stateful singleton irrelevant to this seam) is mocked
@@ -36,9 +39,9 @@ function makeCtx(args: Partial<RuntimePtySpawnArgs>) {
   return createRuntimePtySpawnState(deps, fullArgs)
 }
 
-describe('spawn-execute.ts commit-guard propagation (SPEC §4.5.1 sites #16/#17/#19, RED)', () => {
+describe('spawn-execute.ts commit-guard propagation (SPEC §4.5.1 sites #16/#17/#19, GREEN)', () => {
   it(
-    'RED (gate 47/61, site #16): agentSessionEnsure branch does not await the durable commit ' +
+    'GREEN (gate 47/61, site #16): agentSessionEnsure branch awaits the durable commit ' +
       'before executeRuntimePtySpawn resolves',
     async () => {
       let resolveDurable!: () => void
@@ -58,8 +61,8 @@ describe('spawn-execute.ts commit-guard propagation (SPEC §4.5.1 sites #16/#17/
       ctx.provider = {
         spawn: vi.fn(async (): Promise<PtySpawnResult> => ({ id: 'pty-1', incarnationId: 'inc-1' }))
       } as unknown as IPtyProvider
-      // Site #16 reads back this exact closure, bare, unawaited.
-      ctx.reportPtySpawnCommitted = (() => durable) as unknown as () => void
+      // Site #16 reads back this exact closure.
+      ctx.reportPtySpawnCommitted = () => durable
 
       let settled = false
       const execution = executeRuntimePtySpawn(ctx).then(() => {
@@ -72,9 +75,8 @@ describe('spawn-execute.ts commit-guard propagation (SPEC §4.5.1 sites #16/#17/
       await new Promise((resolve) => setImmediate(resolve))
 
       // FROZEN CONTRACT (§4.5.1 site #16): executeRuntimePtySpawn's own
-      // returned Promise must not resolve before the durable commit does.
-      // Fails today -- the direct `ctx.reportPtySpawnCommitted()` call at
-      // spawn-execute.ts:88 is bare and unawaited.
+      // returned Promise does not resolve before the durable commit does --
+      // GREEN, via `await ctx.reportPtySpawnCommitted()` at spawn-execute.ts:88.
       expect(settled).toBe(false)
 
       resolveDurable()
@@ -84,7 +86,7 @@ describe('spawn-execute.ts commit-guard propagation (SPEC §4.5.1 sites #16/#17/
   )
 
   it(
-    'RED (gate 59/61, sites #17/#19): non-agentSessionEnsure branch does not await onFreshSpawn ' +
+    'GREEN (gate 59/61, sites #17/#19): non-agentSessionEnsure branch awaits onFreshSpawn ' +
       'before spawnForStablePane/executeRuntimePtySpawn resolves',
     async () => {
       let resolveDurable!: () => void
@@ -97,8 +99,8 @@ describe('spawn-execute.ts commit-guard propagation (SPEC §4.5.1 sites #16/#17/
         spawn: vi.fn(async (): Promise<PtySpawnResult> => ({ id: 'pty-2', incarnationId: 'inc-2' }))
       } as unknown as IPtyProvider
       // Site #17 forwards this exact reference into spawnForStablePane's
-      // onFreshSpawn; site #19 (stable-owner.ts:302) calls it bare.
-      ctx.reportPtySpawnCommitted = (() => durable) as unknown as () => void
+      // onFreshSpawn; site #19 (stable-owner.ts:302) reads it back.
+      ctx.reportPtySpawnCommitted = () => durable
 
       let settled = false
       const execution = executeRuntimePtySpawn(ctx).then(() => {
@@ -106,8 +108,8 @@ describe('spawn-execute.ts commit-guard propagation (SPEC §4.5.1 sites #16/#17/
       })
       await new Promise((resolve) => setImmediate(resolve))
 
-      // FROZEN CONTRACT (§4.5.1 sites #17/#19): fails today -- `args.onFreshSpawn?.(result)`
-      // at stable-owner.ts:302 is bare and unawaited.
+      // FROZEN CONTRACT (§4.5.1 sites #17/#19): GREEN -- `await args.onFreshSpawn?.(result)`
+      // at stable-owner.ts:302.
       expect(settled).toBe(false)
 
       resolveDurable()
@@ -117,8 +119,8 @@ describe('spawn-execute.ts commit-guard propagation (SPEC §4.5.1 sites #16/#17/
   )
 
   it(
-    'RED (gate 48/62): a rejection from the durable commit does not stop the ' +
-      'agentSessionEnsure spawn flow from completing "successfully"',
+    'GREEN (gate 48/62): a rejection from the durable commit stops the ' +
+      'agentSessionEnsure spawn flow from reporting success',
     async () => {
       const rejectionError = new Error('durable_commit_failed')
       let capturedPromise: Promise<void> | undefined
@@ -135,10 +137,10 @@ describe('spawn-execute.ts commit-guard propagation (SPEC §4.5.1 sites #16/#17/
       ctx.provider = {
         spawn: vi.fn(async (): Promise<PtySpawnResult> => ({ id: 'pty-3', incarnationId: 'inc-3' }))
       } as unknown as IPtyProvider
-      ctx.reportPtySpawnCommitted = (() => {
+      ctx.reportPtySpawnCommitted = () => {
         capturedPromise = Promise.reject(rejectionError)
         return capturedPromise
-      }) as unknown as () => void
+      }
 
       let thrown: unknown
       try {
@@ -148,10 +150,9 @@ describe('spawn-execute.ts commit-guard propagation (SPEC §4.5.1 sites #16/#17/
       }
       await capturedPromise?.catch(() => {})
 
-      // FROZEN CONTRACT (Area M/§5.8): a rejected durable commit must
-      // prevent the spawn flow from reporting success. Fails today --
-      // executeRuntimePtySpawn resolves normally; `ctx.result` is populated
-      // as a live, authoritative spawn regardless.
+      // FROZEN CONTRACT (Area M/§5.8): GREEN -- a rejected durable commit
+      // prevents the spawn flow from reporting success; the rejection
+      // reaches executeRuntimePtySpawn's own caller.
       expect(thrown).toBe(rejectionError)
     }
   )

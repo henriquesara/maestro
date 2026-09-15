@@ -13,6 +13,7 @@ import type { PtyProcessInfo } from './pty-process-info'
 import type { TerminalExitCause } from '../../shared/terminal-exit-cause'
 import type { TerminalOwner } from '../../shared/terminal-owner'
 import type { WriteSettlement } from '../../shared/pty-write-settlement'
+import type { DelegationCutoverCommitResult } from '../../shared/delegation-cutover-commit-result'
 
 export type {
   PtyBackgroundStreamEvent,
@@ -105,10 +106,20 @@ export type PtySpawnOptions = {
   }
   /** Host-scoped structured-create identity used only for lower-owner replay. */
   agentSessionCreateOperationId?: string
-  /** Signals that the native process exists even if later publication fails. */
-  onPtySpawnCommitted?: () => void
+  /** Signals that the native process exists even if later publication fails.
+   *  A delegated caller's callback returns a Promise for the future durable
+   *  spawn-commit transaction (SPEC.md §4.5); every existing, non-delegated
+   *  caller keeps passing a plain `() => void` callback unchanged. */
+  onPtySpawnCommitted?: () => Promise<DelegationCutoverCommitResult | void> | void
   /** Cancels only before physical dispatch; operation identity fences later ambiguity. */
   signal?: AbortSignal
+  /** Delegated-safe launch mode (SPEC.md §4.1a): forces the codebase's own
+   *  existing "command not embeddable in argv" branch unconditionally, so
+   *  the workload command is never written to the spawned process's argv
+   *  and instead remains deferred for later, controlled delivery. Set only
+   *  by the future delegated call path; absent/false for every ordinary
+   *  terminal or agent-session spawn today -- purely additive. */
+  deferDelegatedCommandDelivery?: boolean
 }
 
 export type { PtyProcessInfo, PtySpawnResult }
@@ -136,6 +147,12 @@ export type IPtyProvider = {
   providesAgentSessionOwnerListings?: (ptyId: string) => boolean
   /** Whether fresh structured creates can replay one spawn across a lost relay response. */
   supportsAgentSessionCreateOperations?: (options?: PtyProbeOptions) => boolean | Promise<boolean>
+  /** Whether this provider satisfies the full delegated-cutover prerequisite
+   *  contract (SPEC.md §7.3): deferred command delivery honored end-to-end
+   *  and a genuinely awaitable spawn-commit chain. Absent/anything but
+   *  `true` is treated as unsupported -- the inverse default from the two
+   *  capabilities above, because this gate must fail closed. */
+  supportsDelegatedCutoverHold?: (options?: PtyProbeOptions) => boolean | Promise<boolean>
   attach(id: string): Promise<Pick<PtySpawnResult, 'providerSequence'> | void>
   hasPty?: (id: string) => boolean
   /** Exact provider readback: false only when the provider answered that the PTY is absent. */

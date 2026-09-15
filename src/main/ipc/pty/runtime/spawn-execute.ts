@@ -85,7 +85,13 @@ export async function executeRuntimePtySpawn(ctx: RuntimePtySpawnState): Promise
           providerResult = await ctx.provider.spawn(ctx.spawnOptions)
           ctx.rejectedRegistrationCandidate = providerResult
           // Why: a successful lower-owner return proves physical work committed even if admission sees an early exit.
-          ctx.reportPtySpawnCommitted()
+          // Why await: for a local-PTY delegated spawn this always reads
+          // back the already-settled (or still in-flight) result site #12
+          // produced inside ctx.provider.spawn -- never a second attempt
+          // (SPEC.md §4.5.1a) -- but it must never be a floating,
+          // unobserved Promise either way; a rejection here must reach this
+          // flow's own caller, not be silently dropped.
+          await ctx.reportPtySpawnCommitted()
           assertSpawnReplyWasLive(providerResult)
           ctx.deps.runtime?.assertPtyRegistrationAllowed?.(
             providerResult.id,

@@ -27,6 +27,7 @@ import {
   paneSpawnReservationsByOwnerKey
 } from '../pane/spawn-reservation'
 import type { RuntimePtySpawnState } from './spawn-state'
+import { createAsyncSpawnCommitReporter } from '../../../../shared/async-spawn-commit-reporter'
 
 export async function buildRuntimePtySpawnOptions(
   ctx: RuntimePtySpawnState
@@ -56,14 +57,7 @@ export async function buildRuntimePtySpawnOptions(
       deadlineMs: 5_000
     }
   }
-  let ptySpawnCommitReported = false
-  ctx.reportPtySpawnCommitted = (): void => {
-    if (ptySpawnCommitReported) {
-      return
-    }
-    ptySpawnCommitReported = true
-    args.onPtySpawnCommitted?.()
-  }
+  ctx.reportPtySpawnCommitted = createAsyncSpawnCommitReporter(args.onPtySpawnCommitted)
   ctx.spawnOptions.envToDelete = mergePtyEnvDeletions(
     authEnvToDelete,
     args.envToDelete ?? [],
@@ -163,6 +157,20 @@ export async function buildRuntimePtySpawnOptions(
     (await (ctx.provider as IPtyProvider).supportsAgentSessionCreateOperations?.()) === false
   ) {
     throw new Error('execution_owner_unavailable')
+  }
+  if (
+    args.deferDelegatedCommandDelivery === true &&
+    // Why `!== true`, the inverse idiom from the two checks above (SPEC.md
+    // §7.3): this gate must fail closed -- absence of the capability is
+    // exactly as unsupported as an explicit `false`, so a future provider
+    // must opt in, never merely fail to opt out. Checked before any future
+    // fence-acquisition boundary; this session has none.
+    (await (ctx.provider as IPtyProvider).supportsDelegatedCutoverHold?.()) !== true
+  ) {
+    throw new Error('delegated_cutover_provider_unsupported')
+  }
+  if (args.deferDelegatedCommandDelivery !== undefined) {
+    ctx.spawnOptions.deferDelegatedCommandDelivery = args.deferDelegatedCommandDelivery
   }
   if (!ctx.preAdoptedStablePane && args.agentSessionEnsure) {
     ctx.spawnOptions.agentSessionEnsure = args.agentSessionEnsure

@@ -18,6 +18,7 @@ import type { RuntimeTerminalSend } from '../../shared/runtime-terminal-contract
 import type { RuntimeTerminalWriteOptions } from './runtime-terminal-writer'
 import type { RuntimePtyController } from './runtime-pty-controller-contract'
 import type { RuntimeAgentRowSnapshot } from './runtime-worktree-agent-rows'
+import type { DelegationCutoverCommitResult } from '../../shared/delegation-cutover-commit-result'
 import type { WorkerTerminalHostScope } from './orchestration/worker-terminal-process-liveness'
 
 export type TerminalCreateOptions = {
@@ -52,7 +53,7 @@ export type TerminalCreateOptions = {
   agentSessionCreateOperationId?: string
   structuredAgentSessionId?: string
   signal?: AbortSignal
-  onPtySpawnCommitted?: () => void
+  onPtySpawnCommitted?: () => Promise<DelegationCutoverCommitResult> | void
   deferMobileSessionPublish?: boolean
 }
 

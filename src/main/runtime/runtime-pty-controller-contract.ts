@@ -12,6 +12,7 @@ import type { ExecutionHostId } from '../../shared/execution-host'
 import type { PtyProviderBufferSnapshot, PtyProcessInfo, PtySpawnResult } from '../providers/types'
 import type { PtyProcessInspection } from '../providers/pty-process-inspection'
 import type { WriteSettlement } from '../../shared/pty-write-settlement'
+import type { DelegationCutoverCommitResult } from '../../shared/delegation-cutover-commit-result'
 
 export type RuntimePtyController = {
   claimStablePaneCreate?(args: {
@@ -68,7 +69,7 @@ export type RuntimePtyController = {
     }
     agentSessionCreateOperationId?: string
     signal?: AbortSignal
-    onPtySpawnCommitted?: () => void
+    onPtySpawnCommitted?: () => Promise<DelegationCutoverCommitResult> | void
     adoptedStablePane?: {
       result: PtySpawnResult
       owner: {

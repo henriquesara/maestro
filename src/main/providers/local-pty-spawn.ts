@@ -22,6 +22,16 @@ export async function spawnLocalPty(
   args: PtySpawnOptions,
   getOptions: () => LocalPtyProviderOptions
 ): Promise<PtySpawnResult> {
+  // Construction-safety invariant (SPEC.md §4.1a): deferDelegatedCommandDelivery
+  // must never be constructible without the load-bearing onPtySpawnCommitted
+  // callback -- without it, argv delivery is suppressed but local-pty-spawn's
+  // own conditional await below never runs, so nothing ever blocks workload
+  // activation on the durable commit deferral exists to wait for. Checked
+  // first, before any side effect (id allocation, launch-plan construction,
+  // process spawn).
+  if (args.deferDelegatedCommandDelivery === true && !args.onPtySpawnCommitted) {
+    throw new Error('delegated_cutover_commit_callback_required')
+  }
   const reattachId = normalizeLocalCallerSessionId(args.sessionId, args.attachOnly === true)
   if (reattachId) {
     const pendingShutdown = ptyShutdownOperations.get(reattachId)

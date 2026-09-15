@@ -175,16 +175,17 @@ describe('LocalPtyProvider: delegated command delivery (SPEC §4.1a, gates 41/42
   })
 
   function spawnWithDeferredDelivery(overrides: Record<string, unknown> = {}) {
-    // Why the cast: `deferDelegatedCommandDelivery` does not exist on
-    // `PtySpawnOptions` yet (SPEC §4.1a is not implemented) -- this is the
-    // exact caller shape the corrected contract requires the delegated call
-    // path to produce, forced through the type system on purpose.
     const args = {
       cols: 80,
       rows: 24,
       cwd: 'C:\\Users\\jin\\repo',
       command: DELEGATED_MARKER,
       deferDelegatedCommandDelivery: true,
+      // Blocker-2 fix (construction-safety pairing invariant, below) now
+      // requires a real callback whenever the defer flag is set; a
+      // harmless resolved one keeps these argv-suppression tests focused
+      // on argv, not on the pairing invariant itself.
+      onPtySpawnCommitted: async () => {},
       ...overrides
     } as unknown as PtySpawnOptions
     return provider.spawn(args)
@@ -285,13 +286,14 @@ describe('LocalPtyProvider: delegated command delivery (SPEC §4.1a, gates 41/42
         getWindowsShell: () => 'powershell.exe',
         getWindowsPowerShellImplementation: () => 'powershell.exe'
       })
+      spawnMock.mockClear()
 
       // FROZEN INVARIANT: deferDelegatedCommandDelivery === true implies
       // onPtySpawnCommitted is present and usable -- fails closed, before
       // any launch-plan/process side effect.
-      await expect(spawnWithDeferredDelivery()).rejects.toThrow(
-        'delegated_cutover_commit_callback_required'
-      )
+      await expect(
+        spawnWithDeferredDelivery({ onPtySpawnCommitted: undefined })
+      ).rejects.toThrow('delegated_cutover_commit_callback_required')
       expect(spawnMock).not.toHaveBeenCalled()
     })
 

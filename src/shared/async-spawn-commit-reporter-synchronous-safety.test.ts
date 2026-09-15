@@ -14,6 +14,14 @@ import { describe, expect, it } from 'vitest'
 import { createAsyncSpawnCommitReporter } from './async-spawn-commit-reporter'
 import type { DelegationCutoverCommitResult } from './delegation-cutover-commit-result'
 
+// The real callback signature is `() => Promise<DelegationCutoverCommitResult> | void`
+// -- an async callback must resolve to a real result shape, not `Promise<void>`.
+// These tests don't care about the value, only about invocation/caching semantics.
+const DUMMY_RESULT: DelegationCutoverCommitResult = {
+  outcome: 'COMMITTED',
+  correlationId: 'sync-safety-test'
+}
+
 describe('createAsyncSpawnCommitReporter: synchronous-throw safety (blocker 1a)', () => {
   it('caches a synchronous throw as the permanent failure -- no retry on a duplicate call', async () => {
     let invocationCount = 0
@@ -52,7 +60,7 @@ describe('createAsyncSpawnCommitReporter: synchronous-reentrancy safety (blocker
         // (the first, outer invocation) has returned.
         reentrantResult = reporter()
       }
-      return Promise.resolve()
+      return Promise.resolve(DUMMY_RESULT)
     })
 
     const outer = reporter()
@@ -61,14 +69,14 @@ describe('createAsyncSpawnCommitReporter: synchronous-reentrancy safety (blocker
     // underlying operation.
     expect(invocationCount).toBe(1)
     expect(reentrantResult).toBe(outer)
-    return expect(outer).resolves.toBeUndefined()
+    return expect(outer).resolves.toBe(DUMMY_RESULT)
   })
 })
 
 describe('createAsyncSpawnCommitReporter: pending/success/failure caching preserved (regression guard)', () => {
   it('duplicate calls while the underlying operation is still pending return the SAME Promise', () => {
-    let resolveUnderlying!: () => void
-    const underlying = new Promise<void>((resolve) => {
+    let resolveUnderlying!: (result: DelegationCutoverCommitResult) => void
+    const underlying = new Promise<DelegationCutoverCommitResult>((resolve) => {
       resolveUnderlying = resolve
     })
     const reporter = createAsyncSpawnCommitReporter(() => underlying)
@@ -77,7 +85,7 @@ describe('createAsyncSpawnCommitReporter: pending/success/failure caching preser
     const second = reporter()
 
     expect(first).toBe(second)
-    resolveUnderlying()
+    resolveUnderlying(DUMMY_RESULT)
     return first
   })
 

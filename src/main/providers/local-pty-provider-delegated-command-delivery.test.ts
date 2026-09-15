@@ -263,4 +263,75 @@ describe('LocalPtyProvider: delegated command delivery (SPEC §4.1a, gates 41/42
       expect(decoded).toContain('echo hello-ordinary-spawn')
     }
   )
+
+  // Focused RED/GREEN evidence for the ORCA-S5 independent-acceptance
+  // blocker: `deferDelegatedCommandDelivery: true` was constructible
+  // without a paired `onPtySpawnCommitted` callback. The launch plan
+  // withheld the command from argv on the defer flag alone, but
+  // `local-pty-spawn.ts` skips the durable-commit await whenever the
+  // callback is absent -- together, that combination could suppress argv
+  // delivery while never blocking on (or even attempting) the settlement
+  // the deferred delivery exists to wait for.
+  //
+  // History: RED against GREEN candidate 9b31fb6ac7ef70b3f5de23fc7913c9e6f1a3de6a
+  // -- no construction-time check existed; `spawnWithDeferredDelivery()`
+  // (helper above) resolved successfully with no callback at all.
+  describe(
+  'LocalPtyProvider: delegated command delivery -- required commit-callback pairing ' +
+    '(SPEC §4.1a construction safety, blocker 2 fix)',
+  () => {
+    it('REJECTS a delegated spawn missing the required commit callback, before any process is spawned', async () => {
+      provider.configure({
+        getWindowsShell: () => 'powershell.exe',
+        getWindowsPowerShellImplementation: () => 'powershell.exe'
+      })
+
+      // FROZEN INVARIANT: deferDelegatedCommandDelivery === true implies
+      // onPtySpawnCommitted is present and usable -- fails closed, before
+      // any launch-plan/process side effect.
+      await expect(spawnWithDeferredDelivery()).rejects.toThrow(
+        'delegated_cutover_commit_callback_required'
+      )
+      expect(spawnMock).not.toHaveBeenCalled()
+    })
+
+    it('ACCEPTS a delegated spawn that pairs deferDelegatedCommandDelivery: true with a real onPtySpawnCommitted callback', async () => {
+      provider.configure({
+        getWindowsShell: () => 'powershell.exe',
+        getWindowsPowerShellImplementation: () => 'powershell.exe'
+      })
+      let called = false
+
+      const result = await spawnWithDeferredDelivery({
+        onPtySpawnCommitted: async () => {
+          called = true
+        }
+      })
+
+      expect(result.id).toBeTruthy()
+      expect(called).toBe(true)
+      expect(spawnMock).toHaveBeenCalled()
+    })
+
+    it('leaves an ordinary spawn (deferDelegatedCommandDelivery unset) unaffected by the pairing invariant, with a callback present', async () => {
+      provider.configure({
+        getWindowsShell: () => 'powershell.exe',
+        getWindowsPowerShellImplementation: () => 'powershell.exe'
+      })
+      let called = false
+
+      const result = await provider.spawn({
+        cols: 80,
+        rows: 24,
+        cwd: 'C:\\Users\\jin\\repo',
+        command: 'echo hello-ordinary-spawn',
+        onPtySpawnCommitted: async () => {
+          called = true
+        }
+      })
+
+      expect(result.id).toBeTruthy()
+      expect(called).toBe(true)
+    })
+  })
 })

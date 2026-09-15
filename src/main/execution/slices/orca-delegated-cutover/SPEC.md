@@ -26,27 +26,42 @@
 > minimize diff.
 
 **State class:** `ARCHITECTURE_READY_FOR_FOCUSED_REREVIEW`.
-**Display verdict:** `ORCA_S5_DELEGATED_CUTOVER_ARCHITECTURE_SEAM_CORRECTED_READY_FOR_REREVIEW`.
+**Display verdict:** `ORCA_S5_DELEGATED_CUTOVER_DEFERRED_DELIVERY_ARCHITECTURE_READY_FOR_REREVIEW`.
 
-> **Correction history — round 2 (this revision).** A fresh, independent
-> review of `ef699e9fc29f8a9950234d1460907b435b86c87e` (round 1) returned
+> **Correction history — round 2.** A fresh, independent review of
+> `ef699e9fc29f8a9950234d1460907b435b86c87e` (round 1) returned
 > `ARCHITECTURE_CHANGES_REQUIRED`, finding one blocker and two lesser
 > precision defects, all in the seam/ordering claims of the original §4/§5/§12
-> — nowhere else. This revision is a **focused correction**: every other
-> conclusion in round 1 (the real aiControl fence handshake, R3/`DIVERGENCE`
-> classification, cardinality, recovery-vs-retry, cancel-vs-timeout, single
-> terminal authority, source/projection classification, worktree singularity,
-> S4 identity reuse, terminal event semantics, "no Orca core rewrite") was
-> independently re-confirmed accurate by that same review and is preserved
-> below unchanged except where the corrected seam directly touches it. The
-> round-1 blocker: **`onPtySpawnCommitted` does not fire at one clean
-> outer/top-level point** as round 1 assumed — for the load-bearing local-PTY
-> path it fires **nested inside the provider**, before `ptyController.spawn()`
-> even resolves. §4–§5.6 below are rewritten against the real, traced
-> provider call graph, not the simplified diagram round 1 relied on. §12 is
-> corrected for an aiControl cancel-route behavior round 1 asserted but the
-> real file does not contain. The artifact-identity table's "five commits
-> behind" claim is corrected to a non-volatile statement.
+> — nowhere else. Round 2 (`28b664fe0689c30041ea9eb824dcc646a2689c7a`) was a
+> focused correction locating the real nested `onPtySpawnCommitted` firing
+> site inside `spawnLocalPty`.
+>
+> **Correction history — round 3 (this revision).** A second fresh,
+> independent, focused review of round 2 returned `ARCHITECTURE_CHANGES_REQUIRED`
+> again, finding round 2's own central safety claim **falsified by real
+> code it had not traced**: the real default Windows local-PTY path can
+> embed the delegated agent's startup command **directly in the spawned
+> process's argv** (`createWindowsLocalPtyLaunchPlan` →
+> `buildWindowsPowerShellSpawnAttempts`/`getCmdShellArgStartupCommand`/
+> `getPowerShellEncodedCommand`), **before** the chosen seam
+> (`local-pty-spawn.ts:89`) ever runs — round 2's §4.4 explicitly considered
+> and incorrectly ruled this out. Round 3 independently re-traced this exact
+> code path (§4.1a) and found the finding accurate. Round 2's independent
+> review also found the proposed `await` would not actually await anything:
+> the callback passes through **two** nested fire-once guard closures
+> (`createPtySpawnCommitReporter` and a second, inline guard in
+> `spawn-options.ts`), both currently `() => void`, both discarding whatever
+> they call. This revision corrects both defects precisely (§4.1a's
+> deferred-delivery contract; §4.5's full callback type-site table and
+> async-aware guard semantics) and adds the missing provider-eligibility gate
+> (§7.3) the round-2 rereview separately flagged as a secondary gap. Every
+> conclusion round 2's independent review re-confirmed accurate — the real
+> aiControl fence handshake, atomic-transaction structural soundness, the
+> early-exit-race characterization, `assertPtyDidNotExitBeforeRegistration`'s
+> post-cutover semantics, the corrected aiControl cancel-route description,
+> R3/`DIVERGENCE` classification, one-instance/no-respawn discipline, and
+> every area round 1's review had already accepted — is preserved unchanged
+> below except where this round's two corrections directly touch it.
 
 ---
 
@@ -74,6 +89,7 @@
 
 - Maestro (round 1): `GAP-ANALYSIS-ORCA-DELEGATED.md` (full), `delegated-side-effect-boundary/SPEC.md` (full, all 20 sections), `orca-runtime-create-agent-session.ts` and `orca-runtime-create-terminal.ts`, `orca-runtime-report-pty-spawn-commit.ts`, `repo-worktrees.ts`.
 - Maestro (round 2, the real provider call graph, §4): `src/main/ipc/pty/runtime/spawn-options.ts` (full, `buildRuntimePtySpawnOptions`), `src/main/providers/local-pty-spawn.ts` (full, `spawnLocalPty`), `src/main/providers/local-pty-session-activation.ts` (`activateLocalPtySession`'s exit-listener wiring and startup-command delivery, read for the specific call sites cited in §4), `src/main/runtime/orca-runtime-register-pty.ts` (`assertPtyDidNotExitBeforeRegistration`, full).
+- Maestro (round 3, the Windows launch-plan/argv layer and full callback type-site inventory, §4.1a/§4.5): `src/main/providers/local-pty-launch-plan.ts` (full), `src/main/providers/windows-shell-fallback-chain.ts` (full), `src/main/providers/windows-shell-args.ts` (full — `getCmdShellArgStartupCommand`, `getPowerShellEncodedCommand`, `resolveWindowsShellLaunchArgs`), `src/main/providers/local-pty-provider.ts:67`'s own doc comment, `src/main/providers/pty-provider-contract.ts` (full — `PtySpawnOptions.onPtySpawnCommitted`, `supportsAgentSessionClaims`/`supportsAgentSessionCreateOperations` capability-probe precedent), `src/main/runtime/runtime-terminal-contracts.ts:55`, `src/main/runtime/runtime-pty-controller-contract.ts:71`, `src/main/ipc/pty/runtime/spawn-state.ts:115`, `src/main/ipc/pty/pane/stable-owner.ts:213-234` (`attachStablePaneOwner`, confirming the reattach-only path is out of scope).
 - aiControlCenter (`origin/master`, read-only, via `git show`): `docs/HANDOFF.md`, `docs/architecture/orca-delegation-fence-prerequisite.md` (full, all 16 sections), `src/lib/agent-runner/orca-fence.ts` (full, 284 lines), `src/lib/agent-runner/orca-fence-projection.ts` (full, 96 lines), `src/app/api/agent-runs/[id]/cancel/route.ts` (full, 151 lines, round 2, §12).
 
 Unlike the rejected candidate (whose §0 header stated its local aiControlCenter
@@ -217,13 +233,59 @@ entirely with the traced, provider-specific call graph.
    commit signal has to be reported from inside native spawn, not from the
    outer caller.
 4. **`spawnLocalPty`** (`src/main/providers/local-pty-spawn.ts:21`) is the
-   function that actually executes for the local provider. It builds the
-   launch plan and environment (lines 39-59), then at **line 71** calls
-   **`spawnShellWithFallback({ …, ptySpawn: pty.spawn, … })`** — this is the
-   real, synchronous (not `await`ed — the call itself returns synchronously;
-   `pty.spawn` from `node-pty` is synchronous) **OS process creation**.
-   `spawnResult.process` (the real handle, `pid` included) exists the
-   instant this call returns, at line 88.
+   function that actually executes for the local provider. At **line 41**,
+   `createLocalPtyLaunchPlan(args, getOptions)`
+   (`src/main/providers/local-pty-launch-plan.ts:193`) resolves the launch
+   plan — **this is a step round 2's call graph skipped, and it is
+   load-bearing (§4.1a below)**. On `win32` with no WSL context it delegates
+   to `createWindowsLocalPtyLaunchPlan` (line 238 there → line 107), which:
+   - resolves the target shell family (`powershell.exe` by default,
+     `cmd.exe`, or `wsl.exe`/Git Bash) (lines 113-131);
+   - for a PowerShell family, calls `buildWindowsPowerShellSpawnAttempts({
+     …, startupCommand: args.command })`
+     (`windows-shell-fallback-chain.ts:55`, invoked at
+     `local-pty-launch-plan.ts:154-160`) — **`args.command` is the real,
+     full delegated agent CLI invocation, resolved upstream in
+     `orca-runtime-create-agent-session.ts` and threaded through
+     `createTerminal`'s `launchOpts.command` unchanged**;
+   - `buildWindowsPowerShellSpawnAttempts` calls
+     `resolveWindowsShellLaunchArgs(candidate, cwd, defaultCwd, wslContext,
+     startupCommand)` (`windows-shell-fallback-chain.ts:26-32`, itself
+     `windows-shell-args.ts:176`) for each shell in the fallback chain;
+   - for `cmd.exe`: `getCmdShellArgStartupCommand(startupCommand)`
+     (`windows-shell-args.ts:82-96`) embeds `startupCommand` verbatim into
+     the `/K` argument (`shellArgs: ['/K', '<utf8-setup> & <command>']`) and
+     sets `startupCommandDeliveredInShellArgs: true`, **unless** the
+     command is absent, longer than 6000 chars, contains a literal `"`, or
+     the assembled line exceeds `cmd.exe`'s 8191-char limit — any of which
+     instead returns `null`, forcing the existing stdin-delivery fallback;
+   - for PowerShell/`pwsh.exe`: `getPowerShellEncodedCommand(cwd,
+     startupCommand)` (`windows-shell-args.ts:112-136`) appends
+     `startupCommand` to the OSC-133 bootstrap script and base64-encodes the
+     whole thing into a `-EncodedCommand` argument, setting
+     `startupCommandDeliveredInShellArgs: true`, **unless** the command is
+     absent or the encoded payload exceeds a 28,000-char budget, in which
+     case only the bootstrap (no workload command) is encoded and the flag
+     is left unset.
+   - `finalizeLocalPtyLaunchPlan` (line 68) carries
+     `startupCommandDeliveredInShellArgs` straight into the returned
+     `LocalPtyLaunchPlan`.
+
+   Then, back in `spawnLocalPty`, at **line 71**, `spawnShellWithFallback({
+   …, ptySpawn: pty.spawn, … })` — this is the real, synchronous (not
+   `await`ed — the call itself returns synchronously; `pty.spawn` from
+   `node-pty` is synchronous) **OS process creation**, using exactly the
+   `shellArgs` the launch plan resolved above. `spawnResult.process` (the
+   real handle, `pid` included) exists the instant this call returns, at
+   line 88.
+
+   **Confirmed, code-verified: when `startupCommandDeliveredInShellArgs` is
+   `true`, the delegated agent's actual command already exists inside the
+   spawned process's own argv the instant it is created — strictly before
+   step 5 below, strictly before any durable commit could possibly have
+   started.** This is the exact defect an independent focused rereview of
+   round 2 found and round 2's own §4.4 incorrectly ruled out. §4.1a
+   specifies the correction.
 5. **`args.onPtySpawnCommitted?.()`** fires at **line 89** — **immediately
    after the real OS process exists**, and **before** `activateLocalPtySession`
    is ever called (line 111). This is the callback threaded down from step
@@ -233,10 +295,17 @@ entirely with the traced, provider-specific call graph.
    `createTerminal.ts:127` returns**.
 6. **`activateLocalPtySession`** (`local-pty-session-activation.ts`) runs
    only after step 5. It registers the exit listener —
-   **`proc.onExit(...)` at line 126** — and, separately, arranges the
-   startup command/prompt delivery via **`writeStartupCommandWhenShellReady`**
-   (imported line 35, invoked ~line 174), which is **gated on shell-ready
-   detection**, not fired unconditionally at spawn time.
+   **`proc.onExit(...)` at line 126** — and, separately, checks
+   `plan.startupCommandDeliveredInShellArgs` (line ~160): when **false**, it
+   arranges startup command/prompt delivery via
+   **`writeStartupCommandWhenShellReady`** (imported line 35, invoked
+   ~line 174), gated on shell-ready detection; when **true** — the argv-embed
+   case in step 4 above — this call is **skipped entirely**, because
+   delivery already happened at process-creation time, before step 5 ever
+   ran. **This is the round-2 finding that was incomplete: shell-ready
+   gating is real and correctly analyzed for the case where it applies, but
+   it does not apply whenever argv-embedding fires**, which is the common
+   case for a short delegated command on the platform default shell.
 7. Control returns up through `spawnLocalPty`'s promise, through
    `ptyController.spawn()`'s promise, back to `createTerminal.ts:127`'s
    `await`. At **lines 178-180**: `if (!result.stablePaneOwner) {
@@ -252,17 +321,127 @@ entirely with the traced, provider-specific call graph.
    `registerPty` (line 206), then conditionally `revealTerminalSession`
    (line 257) — first external visibility.
 
+### 4.1a `DELEGATED_DEFERRED_COMMAND_DELIVERY` — the corrected pre-cutover safety contract
+
+**Correction to round 2's falsified §4.4 claim.** The invariant "no
+delegated workload side effect before cutover" cannot be satisfied by
+relying on `writeStartupCommandWhenShellReady`'s existing gating alone,
+because that gating is **conditionally bypassed** by the argv-embed path
+(§4.1 step 4/6). The corrected contract instead **forces** the safe branch
+for every delegated spawn, rather than assuming it.
+
+**Mechanism — the smallest additive seam, named exactly, not "disable the
+optimization" left vague:**
+
+- `PtySpawnOptions` (`pty-provider-contract.ts`) gains one new, additive,
+  optional field: `deferDelegatedCommandDelivery?: boolean`.
+- `createLocalPtyLaunchPlan` (`local-pty-launch-plan.ts:193`) reads it from
+  `args.deferDelegatedCommandDelivery`. When `true`, it calls
+  `createWindowsLocalPtyLaunchPlan` (and the POSIX/WSL branches, §4.1a
+  below) with the **command withheld from argv construction specifically**
+  — concretely, `createWindowsLocalPtyLaunchPlan`'s `finish` closure
+  (line 138) passes `startupCommand: undefined` to
+  `buildWindowsPowerShellSpawnAttempts` (instead of `args.command` at line
+  159) and to the non-PowerShell `resolveWindowsShellLaunchArgs` fallback
+  call (instead of `args.command` at line 177), **while `args.command`
+  itself is left completely unchanged everywhere else** — it is still the
+  real launch command, still available for `writeStartupCommandWhenShellReady`
+  to deliver later exactly as it already does for any command the existing
+  fallback logic would have deferred anyway (too long, contains `"`, etc.).
+- This is **not a new code path** — it forces the codebase's own
+  already-existing, already-tested "command not embeddable" branch
+  (`getCmdShellArgStartupCommand` returning `null`;
+  `getPowerShellEncodedCommand` omitting `startupCommand`) to be taken
+  unconditionally for a delegated spawn, regardless of the real command's
+  length or content. `startupCommandDeliveredInShellArgs` is therefore
+  **always** `false`/absent for a delegated spawn, by construction, and
+  `activateLocalPtySession`'s existing branch (§4.1 step 6) therefore
+  **always** takes the shell-ready-gated `writeStartupCommandWhenShellReady`
+  path — the exact mechanism round 2's §4.4 needed and incorrectly assumed
+  was unconditional.
+- **Who sets this flag:** the delegated call path only —
+  `createAgentSession`'s admission decision (§6, after `acquireOrcaFence`
+  succeeds) passes `deferDelegatedCommandDelivery: true` down through
+  `createTerminal`'s options into `ptyController.spawn(...)`'s
+  `PtySpawnOptions`. An ordinary, non-delegated terminal/agent-session
+  creation never sets it, so its argv-embed optimization is completely
+  unaffected — this is additive, not a behavior change for any existing
+  code path.
+- **Threading:** `TerminalCreateOptions` → `RuntimePtySpawnState`/
+  `buildRuntimePtySpawnOptions`'s `ctx.spawnOptions` → `PtySpawnOptions` the
+  provider receives — the **same** existing option-plumbing shape every
+  other `PtySpawnOptions` field already uses (`worktreeId`, `command`,
+  `commandDelivery`, etc.); no new plumbing mechanism is invented.
+
+### 4.1b Shell bootstrap side-effect audit — inertness with respect to the delegated workload
+
+Independently traced against the real `shellArgs` each branch of
+`resolveWindowsShellLaunchArgs` actually produces (`windows-shell-args.ts:176-255`),
+per the mission's explicit instruction not to assert inertness without
+tracing actual launch arguments:
+
+- **`cmd.exe`:** `shellArgs: ['/K', '<utf8-setup> & <preflight?> & <command?>']`
+  (line 195). **No `/D` flag** — `cmd.exe`'s `AutoRun` registry value
+  (`HKCU`/`HKLM\Software\Microsoft\Command Processor\AutoRun`) is processed
+  on launch by default.
+- **`powershell.exe`/`pwsh.exe`:** `shellArgs: ['-NoLogo', '-NoExit',
+  '-EncodedCommand', <payload>]` (line 208). **No `-NoProfile` flag** — the
+  host loads `$PROFILE.CurrentUserAllHosts`/`AllUsersAllHosts` etc. before
+  executing the encoded script, exactly as the module's own doc comment
+  states (line 171: *"dot-source `$PROFILE`... `-NoExit` alone would skip
+  the profile"* — profile loading is deliberate, documented product
+  behavior, not an oversight).
+- **Git Bash:** `-c '<login-shell command>'` invoking `bash --login -i`
+  (line 219, `getGitBashLaunchCommand`) — a login+interactive shell sources
+  `.bash_profile`/`.bashrc` per normal bash semantics.
+- **WSL:** `buildWslInteractiveLoginShellCommand()` (line 146) — an
+  interactive login shell into the distro, sourcing the distro's own
+  `.profile`/`.bashrc`/equivalent.
+
+**Verdict: outcome A, PROVEN INERT BOOTSTRAP — precisely scoped, not
+asserted by fiat.** Every one of these bootstrap phases (`AutoRun`,
+`$PROFILE`, `.bash_profile`/`.bashrc`, the distro's login-shell rc files) is
+**identical, pre-existing product behavior for every terminal Orca creates
+today — delegated or not** (confirmed: none of these flags/behaviors is
+conditioned on `args.command`, `deferDelegatedCommandDelivery`, or any
+delegation-specific state anywhere in the traced code). Its content is the
+**operator's own local shell-environment configuration** (prompt themes,
+aliases, PATH tweaks) — never repository content, never agent/task content,
+never anything `deferDelegatedCommandDelivery` controls or could control.
+It is therefore **outside the scope of the invariant this SPEC exists to
+enforce** ("no *delegated workload* side effect before cutover") by
+definition, not by assumption: the delegated workload is the agent CLI
+invocation this SPEC's §4.1a contract now provably withholds from every
+launch surface until after cutover; the shell's own generic startup
+behavior is orthogonal, unconditional, and was never part of what Slice B
+delegates.
+
+**Not required, but named as an available future hardening, not
+prescribed here:** `-NoProfile` (PowerShell) and `/D` (`cmd.exe`) would
+suppress this pre-existing, unconditional bootstrap phase entirely for a
+delegated spawn specifically, at the cost of behaving differently from
+every other terminal Orca creates (a real product-consistency trade-off,
+not a free change). This SPEC does not require it, because the invariant it
+must satisfy is about the delegated workload command, which §4.1a already
+provably excludes from every pre-cutover surface — but flags the option
+explicitly per the mission's instruction not to leave the question
+implicit.
+
 ### 4.2 PTY spawn-commit firing sites
 
 | Provider | Where `onPtySpawnCommitted` fires | Nested or outer | PID/process identity known? | PTY/process registration complete? | Workload may already have begun? | Caller awaits it today? | Outer (step 7) firing suppressed by idempotent guard? |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| **`LocalPtyProvider`** (Slice B's load-bearing path, §20) | `local-pty-spawn.ts:89`, inside `spawnLocalPty`, before `activateLocalPtySession` | **Nested** — inside the provider, before `ptyController.spawn()` resolves | Yes — `spawnResult.process.pid` already exists | **No** — exit listener (`local-pty-session-activation.ts:126`) and startup-command delivery are both wired up *after* this point, inside `activateLocalPtySession` | **No** (§4.4) — the agent's actual command/prompt is delivered by `writeStartupCommandWhenShellReady`, gated on shell-ready, strictly after this firing point; only a bare shell process exists at the moment the callback fires | No — synchronous, fire-and-forget today | **Yes** — confirmed: for local PTYs the outer call at `create-terminal.ts:179` is unconditionally a no-op |
+| **`LocalPtyProvider`, ordinary (non-delegated) spawn** | `local-pty-spawn.ts:89`, inside `spawnLocalPty`, before `activateLocalPtySession` | **Nested** | Yes — `spawnResult.process.pid` already exists | **No** — exit listener and startup-command delivery are both wired up *after* this point | **May already have begun** if `startupCommandDeliveredInShellArgs` was set (§4.1 step 4/6) — irrelevant for a non-delegated spawn, which has no cutover invariant to violate | No — synchronous, fire-and-forget today | **Yes** — the outer call at `create-terminal.ts:179` is unconditionally a no-op |
+| **`LocalPtyProvider`, delegated spawn (`deferDelegatedCommandDelivery: true`, §4.1a) — Slice B's load-bearing path, §20** | same line 89 | **Nested** | Yes | **No** — unchanged | **No, provably** (§4.1a) — argv-embedding is forced off; `startupCommandDeliveredInShellArgs` is always false; only a bare shell process (§4.1b) exists at the moment the callback fires | Not today — must become `true` (§4.5) | **Yes** — same guarantee |
 | Any provider `spawn-options.ts:176-182`'s condition excludes (i.e. not `LocalPtyProvider` and not routed there by `routesFreshSpawnsToLocalProvider`) | `create-terminal.ts:179`, outer, after `ptyController.spawn()` resolves | **Outer** | Yes — `result.pid` from the resolved `spawn()` call | Depends on that provider's own internal sequencing — **not traced this session** (out of Slice B's local-only scope, §20) | Not traced this session (out of scope) | No — same fire-and-forget wrapper | N/A — this is the only firing for that provider |
 
-**For Slice B's local-only scope, `LocalPtyProvider`'s row is the only one
-that matters, and it is unambiguously the nested site.** Round 1's claim of
-"one universal insertion point" does not hold; this table replaces it with
-the provider-conditional truth.
+**For Slice B's local-only scope, the delegated-spawn `LocalPtyProvider`
+row is the only one that matters, and it is unambiguously the nested site
+— now provably workload-inert given §4.1a's forced deferral.** Round 1's
+claim of "one universal insertion point" does not hold; this table replaces
+it with the provider-conditional truth. §7.3 freezes the explicit
+eligibility gate that keeps the third row (unsupported providers) from ever
+entering delegated authority.
 
 ### 4.3 Chosen authoritative durable commit seam — decision, not a hand-wave
 
@@ -307,90 +486,194 @@ property the mission requires of the chosen seam:
 - retry/recovery cannot create a second authoritative execution instance —
   unchanged from round 1's §11, unaffected by this correction.
 
-### 4.4 Resolution of round 1's residual: workload does NOT begin before this seam fires
+### 4.4 Workload does NOT begin before this seam fires — corrected, round 3
 
-Round 1 (its own §4.2) explicitly flagged as unresolved "whether the agent's
-actual startup command/prompt begins executing synchronously inside
-`ptyController.spawn(...)`." **This is now resolved, not assumed:**
-`writeStartupCommandWhenShellReady` (`local-pty-session-activation.ts`,
-imported at line 35) is invoked from inside `activateLocalPtySession`,
-**after** the point at line 89 where the chosen seam fires (§4.1 steps 5-6),
-and is itself gated on shell-ready detection (`waitsForShellReady:
-plan.shellReadyLaunch?.supportsReadyMarker === true`, confirmed at the same
-call site) — it is not embedded in the initial `pty.spawn` argv the way a
-one-shot command-as-argv launch would be. **At the instant the chosen seam
-fires, a bare shell process exists; the agent's actual command has not yet
-been written to it.** This directly satisfies the mission's §6 invariant
-("no authoritative workload side effect before cutover") for the local path,
-on independently re-verified evidence, not on the honest-but-unresolved
-flag round 1 carried.
+**Round 2's own version of this section was factually wrong and is
+withdrawn, not merely refined.** It claimed startup-command delivery "is
+not embedded in the initial `pty.spawn` argv the way a one-shot
+command-as-argv launch would be" — independently re-checked this round and
+falsified: for the platform-default shell family (PowerShell) or `cmd.exe`,
+with no `deferDelegatedCommandDelivery` forcing, it **is** embedded in argv
+whenever the command fits the budget (§4.1 step 4), and
+`writeStartupCommandWhenShellReady` is then explicitly skipped (§4.1 step
+6). Round 2 considered this exact scenario in the abstract and ruled it out
+without tracing `local-pty-launch-plan.ts`/`windows-shell-args.ts` — the
+files that actually decide it.
 
-### 4.5 Await / failure semantics at the chosen seam
+**The corrected, honest claim:** the invariant does not hold *by default*;
+it holds **because §4.1a's `deferDelegatedCommandDelivery` contract forces
+the codebase's own existing safe branch unconditionally for every delegated
+spawn** — a `true` architectural correction (a new, additive input to
+already-existing logic), not a restated assumption. With that flag set,
+`startupCommandDeliveredInShellArgs` is provably always false
+(`getCmdShellArgStartupCommand`/`getPowerShellEncodedCommand` never receive
+a `startupCommand` to embed, §4.1a), so `writeStartupCommandWhenShellReady`
+is provably always the delivery path taken, and it provably runs only from
+inside `activateLocalPtySession`, which provably runs only after the chosen
+seam (§4.1 steps 5-6). **At the instant the chosen seam fires for a
+delegated spawn, a bare, argv-command-free shell process exists (§4.1b);
+the agent's actual command has not yet been written to it anywhere.** This
+satisfies the mission's invariant for the local delegated path, on
+evidence traced this round specifically to falsify or confirm it — not
+merely re-asserted.
 
-- **Signature:** `spawn-options.ts`'s `PtySpawnOptions.onPtySpawnCommitted`
-  and `local-pty-spawn.ts`'s consumption of it must widen from `() => void`
-  to `() => Promise<DelegationCutoverCommitResult> | void` — a **structured
-  result**, not a bare `Promise<void>`, so a non-delegated (ordinary shadow
-  or legacy) spawn's synchronous `undefined` return remains a valid,
-  unambiguous "nothing to await" signal, and only a Slice-B-delegated spawn
-  ever returns a real promise. `DelegationCutoverCommitResult` is `{
-  committed: true; correlationId: string } | { committed: false; reason:
-  'fence_ineligible' | 'store_busy_retryable' | 'store_error' }` — never a
-  bare boolean, so a caller can distinguish "cleanly declined, safe to
-  proceed native" from "genuinely failed, must not release the process."
-- **Who awaits it, and at which stack frame:** `spawnLocalPty` itself, at
-  line 89, in place of today's bare `args.onPtySpawnCommitted?.()` —
-  `await args.onPtySpawnCommitted?.()`. This is a **local-provider-owned
-  await**, not a change to `createTerminal`'s own control flow (which
-  already, correctly, `await`s the whole of `ptyController.spawn(...)` at
-  line 127 and therefore transitively awaits this).
-- **On rejection / `committed: false`:** `spawnLocalPty` must **not**
-  proceed to `activateLocalPtySession`. It must instead synchronously
-  terminate the just-spawned OS process via the same real, already-existing
-  primitive ORCA-S4 uses (`signalProcessTree`/`admitProcessTreeKill`,
-  `src/shared/child-process/process-tree-termination.ts` — reused, not
-  reinvented) against `spawnResult.process`, and rethrow (for `committed:
-  false`, a typed, catchable error; for a thrown rejection, propagate as-is).
-  This is a **new, explicit teardown branch inside `spawnLocalPty`**, named
-  here because §4.6 shows it is required, not assumed safe by mere
-  awaitability, and enumerated as crash-matrix window X15 (§14).
-- **Does failure prevent workload execution?** Yes, structurally: if
-  `spawnLocalPty` never reaches `activateLocalPtySession`, `writeStartupCommandWhenShellReady`
-  never runs, so the agent's command is never delivered to the (now
-  terminated) process.
-- **Can a failed callback leave a live but unauthorized process?** Only in
-  the narrow window between the OS process existing (§4.1 step 4) and the
-  teardown call completing — bounded, synchronous-path, and explicitly
-  covered as crash-matrix window X15 (§14) if the host dies inside that
-  window rather than the callback itself failing cleanly.
-- **How is the process identified and cleaned up on failure?** By the same
-  `pid` + `os_start_marker` pair the durable transaction itself would have
-  written had it succeeded (captured before the transaction is attempted,
-  §7.1) — never a bare-pid guess, mirroring ORCA-S4's own fail-closed
-  identity discipline exactly.
-- **Callback retry:** not retried *inside* `spawnLocalPty` itself (a single
-  attempt per spawn, bounded by the transaction's own internal
-  `SQLITE_BUSY` retry budget, §5.6) — a `store_busy_retryable` result after
-  that budget is exhausted is treated as a genuine failure for this spawn
-  attempt, not silently retried at the provider layer. A *new* spawn
-  attempt (a new `createAgentSession` call, a new `operationHandle`) is a
-  distinct event, never a disguised retry of this one.
-- **Duplicate invocation idempotency:** unaffected by this widening —
-  `createPtySpawnCommitReporter`'s existing `reported` guard still fires the
-  underlying callback at most once; the durable transaction itself is
-  additionally idempotent by `delegation_cutover`'s own `PRIMARY KEY`/`UNIQUE`
-  constraints (§8.1), so even a hypothetical double-invocation (not possible
-  today, per the guard) could not double-commit.
+### 4.5 True Promise propagation — corrected end-to-end, round 3
+
+**Round 2's defect, confirmed by independent rereview:** round 2 widened
+only `spawn-options.ts`'s `PtySpawnOptions.onPtySpawnCommitted` and
+`local-pty-spawn.ts`'s consumption of it. It never named the two fire-once
+guard closures the callback actually passes through, both of which are
+`() => void` today and **discard** whatever the wrapped callback returns.
+`await args.onPtySpawnCommitted?.()` at `local-pty-spawn.ts:89` would
+therefore resolve to `undefined` **immediately**, regardless of how long
+the real durable transaction takes — the await would exist syntactically
+and do nothing semantically. This section corrects that end-to-end, per
+mission 12's explicit "do not say 'and similar callers' — name every site."
+
+#### 4.5.1 Complete callback type-site inventory (every occurrence in the repository)
+
+| # | Site | Current type/behavior | Classification | Required change |
+| --- | --- | --- | --- | --- |
+| 1 | `runtime-terminal-contracts.ts:55` — `TerminalCreateOptions.onPtySpawnCommitted` | `?: () => void` | Type-only declaration | Widen to `?: () => Promise<DelegationCutoverCommitResult> \| void` |
+| 2 | `runtime-pty-controller-contract.ts:71` — the options type `ptyController.spawn(...)` accepts | `?: () => void` | Type-only declaration | Same widening |
+| 3 | `pty-provider-contract.ts:109` — `PtySpawnOptions.onPtySpawnCommitted` | `?: () => void` | Type-only declaration | Same widening |
+| 4 | `spawn-state.ts:115` — `RuntimePtySpawnState`'s `spawnOptions.onPtySpawnCommitted` | `?: () => void` | Type-only declaration | Same widening |
+| 5 | `orca-runtime-create-agent-session.ts:225-227` — the real application callback (`onPtySpawnCommitted: () => { retainReplayFence = true }`) | synchronous, in-memory flag write | **The real logical operation's home** — this is where the durable transaction (§7's five-insert commit) must actually run for a delegated spawn | Becomes `async (): Promise<DelegationCutoverCommitResult> => { … }` for a delegated spawn (checked via a capability/mode flag, never by guessing); unchanged (`() => void`, still fires `retainReplayFence = true`) for a non-delegated spawn — the union type accommodates both without a breaking change |
+| 6 | `orca-runtime-report-pty-spawn-commit.ts` — `createPtySpawnCommitReporter` (guard **layer 1**) | `(callback?: () => void) => () => void`; boolean `reported` flag; discards `callback?.()`'s return | **Fire-once wrapper — must become async-aware** | §4.5.2 |
+| 7 | `orca-runtime-create-terminal.ts:31` — `reportPtySpawnCommitted = createPtySpawnCommitReporter(launchOpts.onPtySpawnCommitted)` | construction call | Wiring, unchanged shape | Return type follows #6's widened signature |
+| 8 | `orca-runtime-create-terminal.ts:167-168` — threads `reportPtySpawnCommitted` into `ptyController.spawn(...)`'s options | passthrough | Wiring, unchanged | Follows #6's widened signature |
+| 9 | `orca-runtime-create-terminal.ts:178-180` — **outer** invocation `if (!result.stablePaneOwner) { reportPtySpawnCommitted() }` | fire-and-forget call | **Outer duplicate invocation** | Must become `await reportPtySpawnCommitted()`, but per §4.5.2 this always resolves to the **cached** result from the nested firing for a local-PTY delegated spawn — it must never be treated as a fresh attempt, and its resolved value must never be reported as success independent of that cached result (closes the mission's explicit "outer callback cannot report success before durable transaction completes" concern, gate 47) |
+| 10 | `spawn-options.ts:59-66` — the **second**, inline fire-once guard (`ctx.reportPtySpawnCommitted`, guard **layer 2**) | `(): void => { if (ptySpawnCommitReported) return; ptySpawnCommitReported = true; args.onPtySpawnCommitted?.() }` | **Fire-once wrapper — must become async-aware** | §4.5.2 — this is the layer actually threaded into the provider (site #12) |
+| 11 | `spawn-options.ts:176-182` — threads `ctx.reportPtySpawnCommitted` into `ctx.spawnOptions.onPtySpawnCommitted`, provider-conditionally | passthrough | Wiring, unchanged | Follows #10's widened signature |
+| 12 | `local-pty-spawn.ts:89` — **the chosen seam**, `args.onPtySpawnCommitted?.()` | fire-and-forget call | **The actual nested invocation** | Becomes `const commitResult = await args.onPtySpawnCommitted?.()`, branching per §4.5.3/§7 |
+| 13 | `stable-owner.ts:233` — `attachStablePaneOwner` explicitly sets `onPtySpawnCommitted: undefined` | reattach-only path (`attachOnly: true`, `command: undefined`) | **Out of scope, confirmed** | No change — this path never creates a new process and never carries a delegated command; it cannot originate a `delegation_cutover` and is excluded by §7.3's eligibility gate reasoning (a reattach is not a new authoritative execution instance) |
+
+**Invocation-order clarification (unchanged from round 2, restated for
+precision against this table):** for a `LocalPtyProvider` delegated spawn,
+site #12 (nested, inside `spawnLocalPty`) invokes guard layer 2 (site #10),
+which — on its first, real invocation — invokes guard layer 1 (site #6),
+which invokes the real application callback (site #5). Guard layer 1's
+**own** cached Promise is what site #9 (the outer call) later observes.
+Both guard layers must independently cache and re-return/re-await the
+**same** underlying Promise chain — not merely "not error twice" — for the
+await at site #12 to observe genuine completion and for site #9 to observe
+the same already-settled result rather than `undefined`.
+
+#### 4.5.2 Async-aware fire-once guard semantics (both guard layers, identically specified)
+
+Replacing the current `reported: boolean` shape with an explicit
+in-flight-Promise cache, at **both** guard layers (site #6 and site #10),
+identically:
+
+```ts
+type SpawnCommitState =
+  | { phase: 'idle' }
+  | { phase: 'in_flight'; promise: Promise<DelegationCutoverCommitResult | void> }
+  | { phase: 'settled'; result: DelegationCutoverCommitResult | void }
+  | { phase: 'failed'; error: unknown }
+
+function createAsyncSpawnCommitReporter(
+  callback?: () => Promise<DelegationCutoverCommitResult> | void
+): () => Promise<DelegationCutoverCommitResult | void> {
+  let state: SpawnCommitState = { phase: 'idle' }
+  return async () => {
+    if (state.phase === 'in_flight') return state.promise          // DUPLICATE WHILE IN FLIGHT
+    if (state.phase === 'settled') return state.result              // DUPLICATE AFTER SUCCESS
+    if (state.phase === 'failed') throw state.error                 // DUPLICATE AFTER FAILURE
+    const promise = Promise.resolve(callback?.())                   // FIRST INVOCATION
+    state = { phase: 'in_flight', promise }
+    try {
+      const result = await promise
+      state = { phase: 'settled', result }
+      return result
+    } catch (error) {
+      state = { phase: 'failed', error }
+      throw error
+    }
+  }
+}
+```
+
+Frozen semantics, matching the mission's exact required shape:
+
+- **First invocation:** invokes the underlying callback exactly once;
+  durably (for the duration of the in-process guard's lifetime — not
+  across a restart, which is a durable-DB-state question, §7 below, never
+  an in-memory-guard question) records the in-flight promise.
+- **Duplicate while in flight:** returns/awaits the **same** promise object
+  — never starts a second transaction attempt.
+- **Duplicate after success:** returns the **same cached** successful
+  result — never repeats the binding/cutover write; a hypothetical second
+  physical write is additionally impossible regardless, by
+  `delegation_cutover`'s own `PRIMARY KEY`/`UNIQUE` constraints (§8.1) — two
+  independent layers of protection, not one.
+- **Duplicate after failure — the mission's explicit "choose and justify"
+  requirement:** **adopts the mission's own preferred safety shape exactly:
+  cache and re-throw the same failure for that process identity.** A
+  duplicate call (the outer, site #9) never gets a second chance to
+  succeed where the nested, site #12 attempt already failed, and can never
+  silently convert an already-failed, already-torn-down prepared process
+  into an authorized one. Recovery from a genuine failure happens only
+  through the durable reconciliation sweep re-reading actual DB state
+  (§7.4), never through a duplicate callback delivery being treated as a
+  fresh attempt.
+
+Both `createPtySpawnCommitReporter` (site #6) and `spawn-options.ts`'s
+inline guard (site #10) are replaced by this identical shape — two call
+sites, one specified behavior, no divergence between them.
+
+#### 4.5.3 `DelegationCutoverCommitResult` — evidence of durable state, never authority itself
+
+Per the mission's explicit instruction ("the result itself does not become
+authority, or is it only evidence that the durable DB fact exists? It must
+be the latter") — restated as a hard rule, not left implicit:
+
+```ts
+type DelegationCutoverCommitResult =
+  | { outcome: 'COMMITTED'; correlationId: string }
+  | { outcome: 'ALREADY_COMMITTED_SAME_IDENTITY'; correlationId: string }  // idempotent retry / duplicate-after-success surfaced through a fresh re-read, not the in-memory cache
+  | { outcome: 'REJECTED_PRE_COMMIT'; reason: 'fence_ineligible' | 'store_busy_retryable' | 'store_error' }
+  | { outcome: 'DIVERGENCE'; detail: string }             // durable state disagrees with what this attempt expected — never silently trusted
+  | { outcome: 'RECONCILIATION_REQUIRED' }                // an exception occurred after the transaction may have committed but before this Promise could observe it — see below
+```
+
+- **`COMMITTED`/`ALREADY_COMMITTED_SAME_IDENTITY` are reports of an
+  already-durable fact, not the fact itself.** Authority transferred at the
+  instant the real `BEGIN IMMEDIATE … COMMIT` transaction (§7) actually
+  committed in SQLite — which may be *before* this Promise's resolution is
+  observed by any caller, per the ordinary async-runtime gap between "the
+  driver acknowledges commit" and "the awaiting code resumes." No caller
+  may treat "the Promise has not yet resolved" as evidence authority has
+  not transferred.
+- **`RECONCILIATION_REQUIRED` is the honest answer to the mission's own
+  posed scenario** — an exception (process crash excepted, §12; this is
+  for an in-process exception, e.g. a driver error after the underlying
+  commit but before the calling code observes success) fires between the
+  commit and the Promise settling. The caller **must never infer authority
+  from Promise rejection alone in this case** — it must re-read
+  `delegation_cutover` for this `correlationId` from the Execution store
+  before choosing any cleanup/release action (§7 below). This is not a
+  hypothetical: it is the same class of gap ORCA-S1–S4's own `SQLITE_BUSY`
+  retry discipline already treats as ordinary, not exceptional.
+- **No other outcome values are invented** — five is sufficient and each
+  has a distinct, necessary caller action; the mission's "do not invent
+  unnecessary states" is honored by keeping this list closed.
 
 ### 4.6 Reentrancy / latency analysis (mandatory, not assumed)
 
-**What is held open while the nested callback is awaited:** the outer
-`claimStablePaneCreate`/pane-spawn reservation (`create-terminal.ts:45-58`,
-released only in the `finally { releaseStablePaneCreate() }` at the end of
-`createTerminal`) spans the entire `ptyController.spawn(...)` call,
-including everything inside `spawnLocalPty` — so awaiting the durable
-transaction at line 89 **does** hold that reservation open for the
-transaction's duration. **Concrete effect:** a *concurrent* spawn request
+**What is held open while the nested callback is awaited, corrected round
+3:** the outer `claimStablePaneCreate`/pane-spawn reservation
+(`create-terminal.ts:45-58`) is released in an **inner**
+`finally { releaseStablePaneCreate() }` immediately wrapping the
+`ptyController.spawn(...)` call (`orca-runtime-create-terminal.ts:175-177`)
+— **not**, as round 2 imprecisely stated, "at the end of `createTerminal`."
+(The function's outer end-of-body `finally`, lines 295-297, is a
+now-idempotent no-op via the `stablePaneCreateReleased` guard — real, but
+not where release actually happens.) The substantive conclusion is
+unchanged and, if anything, tighter than round 2 described: the reservation
+spans **exactly** the `ptyController.spawn(...)` call, including everything
+inside `spawnLocalPty` — so awaiting the durable transaction at line 89
+**does** hold that reservation open for the transaction's duration. **Concrete effect:** a *concurrent* spawn request
 for the exact same `(worktreeId, connectionId, tabId, leafId)` pane would
 block on `existingPaneSpawn.promise` (`spawn-options.ts:201`) until this
 transaction completes — a real, named latency cost, not zero as an
@@ -442,29 +725,35 @@ already-existing, already-instrumented early-exit race rather than creating
 a new one. Nothing here required moving durable orchestration out of the
 provider.
 
-### 4.7 Duplicate spawn-commit delivery — idempotence, both nested and outer (closes mission item 10)
+### 4.7 Duplicate spawn-commit delivery — idempotence, both nested and outer, corrected round 3
 
-Documented precisely, not assumed: `createPtySpawnCommitReporter`
-(`orca-runtime-report-pty-spawn-commit.ts`) wraps the callback in a
-`reported` boolean guard that flips exactly once. For the local-PTY path
-(§4.2's table), this means:
+Round 2's version of this section described the pre-correction boolean
+`reported` guard; §4.5.2's async-aware guard (both layers) supersedes it.
+Restated against the corrected mechanism, for the local-PTY delegated path
+(§4.2's table):
 
-- The **nested** call (`local-pty-spawn.ts:89`) is always the **first**
-  delivery — it fires before the outer call site is ever reached.
-- The **outer** call (`create-terminal.ts:179`) is, for this path,
-  **always and unconditionally a no-op** — the guard has already flipped.
-  This SPEC's protocol places zero reliance on the outer firing for
-  binding, cutover, release, or recovery metadata, exactly as required:
-  the durable transaction (§5.4) runs entirely inside the nested firing;
-  nothing downstream re-attempts or re-validates it at the outer site.
+- The **nested** call (site #12, `local-pty-spawn.ts:89`) is always the
+  **first** delivery — it fires before the outer call site is ever
+  reached, and is the one that actually starts the real logical operation
+  (state transitions `idle → in_flight → settled|failed`, §4.5.2).
+- The **outer** call (site #9, `create-terminal.ts:179`) now `await`s the
+  same guard layer, and — because it always runs strictly after the nested
+  call already started (§4.1 steps 5-7) — it always observes `in_flight`
+  (and then awaits the same promise to `settled`/`failed`) or already
+  `settled`/`failed`. **It can never observe `idle` and therefore can
+  never start a second logical operation, and it can never report success
+  before the durable transaction the nested call started has actually
+  completed** — directly satisfying gate 47.
 - **Exactly one logical spawn-commit protocol executes per authoritative
   production execution identity** — guaranteed by two independent
-  mechanisms, not one: the JS-level `reported` guard (prevents a second
-  *callback invocation*) and, defensively, `delegation_cutover`'s own
-  `PRIMARY KEY`/`UNIQUE` constraints (§8.1, prevents a second *durable
-  commit* even in a hypothetical future where the JS guard were removed or
-  bypassed). Duplicate callback delivery is harmless by construction at
-  both layers.
+  mechanisms, not one: the async-aware guard (§4.5.2, prevents a second
+  *callback invocation* and propagates the same result/failure to every
+  duplicate caller) and, defensively, `delegation_cutover`'s own `PRIMARY
+  KEY`/`UNIQUE` constraints (§8.1, prevents a second *durable commit* even
+  in a hypothetical future where the JS guard were bypassed). Duplicate
+  callback delivery is harmless by construction at both layers, including
+  the duplicate-after-failure case (§4.5.2 — cached, re-thrown, never
+  silently retried).
 
 ---
 
@@ -498,14 +787,23 @@ S1   FENCE_ACQUIRED                    [aiControl commit — Phase 1, §6]
        (orca_fence_state='fenced'; authority still AICONTROL_NATIVE; native
         claim/dequeue/direct-claim/execute structurally impossible, §6.2)
 S2   ORCA_PREPARING
-       (createAgentSession/createTerminal resolve dispatch/worktree identity,
-        launch plan, preAllocatedHandle — all in-memory; §4.1 steps 1-2;
-        nothing durable yet)
+       (createAgentSession/createTerminal resolve dispatch/worktree identity
+        — the real dispatch worktree itself already durably exists on disk,
+        via Maestro's existing, unrelated worktree infrastructure, §13; the
+        new dispatch_worktree ROW is not yet written, that happens at S5 —
+        preAllocatedHandle minted, and createTerminal sets
+        deferDelegatedCommandDelivery: true on the PtySpawnOptions (§4.1a);
+        §4.1 steps 1-2; nothing durable-to-this-slice yet)
 S3   LOCAL_PROCESS_SPAWNED             [real side effect — local-pty-spawn.ts:71-88]
-       (spawnShellWithFallback returns; the real OS process + pid exist;
+       (createLocalPtyLaunchPlan/createWindowsLocalPtyLaunchPlan resolve
+        shellArgs FIRST, with the workload command WITHHELD from argv
+        construction per S2's flag, §4.1a — the shell family's own
+        bootstrap behavior is proven inert with respect to the delegated
+        workload, §4.1b — THEN spawnShellWithFallback returns; the real OS
+        process + pid exist; the delegated workload command is provably NOT
+        in this process's argv or any input it has received, §4.1a/§4.1b;
         STILL nested inside spawnLocalPty, before activateLocalPtySession;
-        no exit listener registered yet, §7; not yet visible to Maestro's
-        own pty bookkeeping at all — §4.1 step 4)
+        no exit listener registered yet, §7)
 S4   PROVIDER_HOOK_INVOKED             [local-pty-spawn.ts:89 — the chosen seam, §4.3]
        (the nested onPtySpawnCommitted call begins; the durable transaction
         attempt starts; still nested, still inside spawnLocalPty)
@@ -539,13 +837,15 @@ S8   OUTER_SPAWN_RESOLVED              [createTerminal.ts:127's await returns]
 S9   AICONTROL_CUTOVER_ACKNOWLEDGED    [aiControl commit — Phase 3, §6]
        (orca_fence_state='fenced'→'cutover'; acknowledgement only)
 S10  ORCA_EXECUTING                    [writeStartupCommandWhenShellReady fires, §4.4]
-       (shell-ready reached; the agent's actual command is written; this is
-        the first point workload execution genuinely begins. NOTE: this can
-        occur concurrently with, or even slightly before, S8/S9 completing
-        in wall-clock time — it is gated on shell-readiness, not on the
-        outer spawn promise — but it can NEVER occur before S5/S6, because
-        activateLocalPtySession, which schedules it, is only reached from
-        S6)
+       (shell-ready reached; the agent's actual command is written — THE
+        ONLY point in this entire sequence the delegated workload command
+        is ever delivered anywhere, §4.1a; this is the first point workload
+        execution genuinely begins. NOTE: this can occur concurrently with,
+        or even slightly before, S8/S9 completing in wall-clock time — it
+        is gated on shell-readiness, not on the outer spawn promise — but
+        it can NEVER occur before S5/S6, because activateLocalPtySession,
+        which schedules it, is only reached from S6, and S6 only exists
+        because S5's durable commit succeeded)
 S11  ORCA_TERMINAL_CLOSED              [dispatch_lifecycle_closure written, §9]
 S12  AICONTROL_TERMINAL_PROJECTED      [projectDelegatedTerminalResult, §10]
 ```
@@ -573,11 +873,15 @@ itself externally visible — not to a renderer, not to aiControl, and, per
 §4.1's finding, **not even to Maestro's own PTY exit-tracking or pty
 registry yet**.
 
-**Round 1's residual is now resolved, not merely restated (§4.4):**
-workload execution (S10) provably cannot precede the durable commit (S5),
-because the mechanism that would deliver a command
-(`writeStartupCommandWhenShellReady`) is only ever scheduled from S7, which
-is only reached from S6, which only exists because S5 committed.
+**Genuinely resolved now, not merely restated — and not by round 2's own
+(falsified) reasoning (§4.4):** workload execution (S10) provably cannot
+precede the durable commit (S5) for a delegated spawn, because §4.1a's
+`deferDelegatedCommandDelivery` contract makes `writeStartupCommandWhenShellReady`
+the **only** delivery path (never argv-embedding), and that mechanism is
+only ever scheduled from S7, which is only reached from S6, which only
+exists because S5 committed. Round 2 asserted this same conclusion without
+having verified the premise; round 3 verified the premise and found it
+needed correcting before the conclusion could actually hold (§4.4).
 
 ### 5.4 Transaction boundary at S5
 
@@ -659,6 +963,140 @@ tracking" as its normal restart case (that is, in fact, its *only* case —
 ORCA-S4's composition root never persists a cross-call handle registry
 either, §9.1.2). No new mechanism is required; this is confirmed reuse, not
 an assumption.
+
+### 5.7 Cutover committed, command not yet delivered, then crash — frozen contract (new, round 3)
+
+The exact scenario the mission names: S5 committed, S6 (release) happened,
+S7 (`activateLocalPtySession`) may or may not have finished scheduling
+delivery, S10 (actual command write via `writeStartupCommandWhenShellReady`)
+has **not** yet fired — then Maestro/the host crashes.
+
+**Does not require a durable "command delivered" fact of its own — outcome
+(C), a terminal/reconciliation outcome for the same instance, is frozen,
+not (A) or (B):**
+
+- **(A) rejected:** "safely retryable/idempotent redelivery to the same
+  process" cannot be proven — `writeStartupCommandWhenShellReady` writes to
+  the PTY's stdin-equivalent input stream; nothing in the traced code gives
+  a durable marker of whether bytes already in flight before the crash were
+  received by the shell, so blindly re-writing risks a duplicated or
+  garbled command line. This SPEC does not claim idempotent redelivery
+  without evidence for it.
+- **(B) rejected:** inventing a new durable "command delivery" fact and
+  writer is exactly the kind of new mechanism §5.6 already argues against
+  where an existing one suffices — and one already does (below).
+- **(C) frozen:** on restart, the sweep (§12) finds a `dispatch_process_binding`
+  with `delegation_cutover` already committed and no `dispatch_termination`
+  yet. It applies **the same restart-recovered identity path §5.6 already
+  uses for C3-C4** — re-derive liveness from the OS (`pid` +
+  `os_start_marker`), never from in-memory delivery state (which the
+  restart destroyed regardless). Two outcomes, both already-specified
+  mechanism, no new fact:
+  - **Process still alive, identity-verified:** command delivery status is
+    genuinely unknown (it may have been written, partially written, or not
+    written at all) — this SPEC does **not** attempt to guess or redeliver.
+    The process is treated as a live, authoritative, already-delegated
+    execution instance whose observable behavior (output, eventual exit)
+    the sweep continues to track via the unmodified ORCA-S4 mechanism
+    (§9.3) exactly as it would for any other live delegated process. If the
+    agent never received its command, it will simply sit idle at a shell
+    prompt — an operationally observable, not a silently-corrupted, state;
+    a future implementation may add a liveness/output heartbeat check as
+    an operational refinement, but this SPEC does not require one to be
+    correct, only to be potentially slow to notice.
+  - **Process confirmed gone:** `dispatch_termination(termination_method='confirmed_dead_unknown_cause')`
+    (ORCA-S4 §8.2, unchanged), closure computes `terminal_status_ref = NULL`
+    (§9.2, honestly unclassifiable — this SPEC does not invent "failed
+    because command delivery was interrupted" as a fact it cannot prove),
+    and a `dispatch_lifecycle_incident` is raised for operator
+    adjudication.
+- **Absolute in both branches:** **no second process is ever spawned.**
+  The fence is **never** released (S5 already committed — §6.1's own CAS
+  already refuses a release against a `'cutover'` row). Authority remains
+  `ORCA_DELEGATED` regardless of whether the command was ever delivered.
+
+### 5.8 Authority-aware callback-failure cleanup (new, round 3, supersedes §4.5's undifferentiated version)
+
+§4.5's teardown-on-rejection branch is now split explicitly by **when** the
+failure/uncertainty is discovered, per the mission's explicit instruction
+not to let callback rejection alone decide which authority owns cleanup:
+
+**Failure discovered before S5 ever commits** (a `REJECTED_PRE_COMMIT` or a
+thrown exception where a re-read of `delegation_cutover` for this
+`correlationId` — required whenever the outcome is not already known with
+certainty, §4.5.3 — confirms no row exists):
+
+- `AICONTROL_NATIVE` remains authority — nothing transferred.
+- the delegated workload is never released (S6 never reached).
+- the prepared process (S3-S4) is safely terminated via §4.5's identity-verified
+  teardown.
+- Maestro may seek fence release **only** through §6.1's positive-evidence
+  path (`safeReleaseOrcaFence`), and only because the re-read genuinely
+  confirms no cutover ever committed — never merely because the callback
+  rejected.
+
+**Failure/uncertainty discovered after S5 has committed** (a
+`RECONCILIATION_REQUIRED` outcome, or any re-read of `delegation_cutover`
+for this `correlationId` that finds a row already exists — including a
+`DIVERGENCE` outcome, where the durable row disagrees with what this
+specific attempt expected, e.g. after a retried operation observes a row
+committed by an earlier, already-completed attempt):
+
+- `ORCA_DELEGATED` is already authority — permanently, for this
+  `correlation_id` (§8.1, no un-delegation path).
+- **the fence must never be released**, under any circumstance, for this
+  identity — §6.1's own CAS already enforces this structurally (`'fenced'`
+  only, never `'cutover'`).
+- process cleanup/termination from this point on is **Orca's own delegated-
+  authority action** (§9.3's ordinary termination path), never a
+  pre-cutover teardown.
+- the resulting outcome (whatever it turns out to be) is classified through
+  the authoritative delegated terminal lifecycle (§9) — `completed`,
+  `failed`, `cancelled`, `timeout`, or the honest
+  `unclassifiable`/`NULL` case (§9.2) — never silently reinterpreted as "the
+  delegation attempt itself failed."
+- **there is no return to native authority from this branch, ever.**
+
+**When the outcome is genuinely ambiguous at the moment of failure** (the
+`RECONCILIATION_REQUIRED` case, §4.5.3): the caller **must** re-read
+`delegation_cutover` before choosing which of the two branches above
+applies — never infer from "the callback rejected" or "the callback never
+resolved" alone, per the mission's explicit rule.
+
+### 5.9 Early bootstrap death while the durable callback is in flight, under deferred delivery (new, round 3)
+
+The scenario: the bootstrap shell process (S3/S4) dies **while** S4's
+durable callback is still awaited (S4→S5, transaction in progress) — before
+the transaction has committed either way.
+
+- **Is `delegation_cutover` allowed to commit after observed early death?**
+  **No new check is required to prevent this, because none is possible
+  without one:** the durable transaction itself has no liveness check built
+  in (it is pure SQLite I/O, §4.6) — it will commit or fail on its own
+  terms regardless of the process's OS-level state at that instant. This
+  SPEC does **not** add a synchronous liveness re-check inside the
+  transaction (that would be a new, unjustified coupling between the
+  Execution store and PTY-provider internals, contradicting §4.6's own
+  finding that "the durable transaction ... independent of `ptyController`/
+  provider internals" is a *safety* property, not an accident). Instead:
+  **a commit that lands after the process has already died is not
+  incorrect — it is simply a `delegation_cutover` for a process that turns
+  out to already be dead**, discovered honestly at the very next sweep pass
+  via the **same** `earlyExitedPtyIncarnations`/`assertPtyDidNotExitBeforeRegistration`
+  mechanism (§4.6, §7.2) or, if that in-process signal was itself lost to
+  the crash, via the sweep's own OS-liveness re-check (§9.3).
+- **If cutover already committed:** treated identically to §5.7's "process
+  confirmed gone" branch — `confirmed_dead_unknown_cause`, honest
+  `NULL` terminal classification, incident raised, **no respawn, no fence
+  release** (authority already transferred).
+- **If cutover had not yet committed** (the transaction was still in
+  flight or failed before landing): treated identically to §5.6's C1-C2 —
+  fail-closed identity check, fence released only via positive evidence
+  that the process is genuinely gone and no commit occurred.
+- **Absolute, restated:** early shell death, whenever it happens relative
+  to the durable commit, **never** resurrects native execution once cutover
+  has genuinely committed, and **never** triggers an automatic respawn in
+  either branch.
 
 ---
 
@@ -804,7 +1242,7 @@ anticipated:
   same fail-closed sidecar/nonce/OS-marker discipline, including the macOS
   compound argv/nonce proof (ORCA-S4 §9.1.3), now protecting a real process.
 
-### 7.2 `assertPtyDidNotExitBeforeRegistration` — the real non-crash throw path (closes mission item 3, "missing non-crash throw path")
+### 7.2 `assertPtyDidNotExitBeforeRegistration` — the real non-crash throw path (reconciled with deferred delivery, round 3)
 
 Independently traced (`orca-runtime-register-pty.ts:189-205`): this is an
 **ordinary, deterministic control-flow check**, not a crash. It fires at S8
@@ -821,14 +1259,21 @@ step runs. Answering the mission's questions exactly:
   understanding round 1 lacked (round 1 never named this check at all).
 - **Can `delegation_cutover` already exist?** Yes, same reasoning — it is
   the same transaction as the binding (§5.4), always committed before S8.
-- **Can workload have executed?** Per §5.2's S10 concurrency note: **it is
-  possible** — `writeStartupCommandWhenShellReady` is gated on shell-ready,
-  not on S8, so a pathological fast exit could in principle race against an
-  already-scheduled command write. This SPEC does not resolve that
-  sub-race's exact timing (flagged as an implementation-time proof
-  obligation, §19 new gate), but it does not change the classification
-  below: the process is already confirmed dead either way, so whether a
-  command write was in flight when it died has no bearing on cleanup.
+- **Can workload have executed?** **Necessarily not before S5/S6, provably
+  (§4.1a/§4.1b, corrected round 3)** — the deferred-delivery contract makes
+  argv-embedding impossible for a delegated spawn, so no workload content
+  exists anywhere before the durable commit. **But it can have executed
+  between S6 and S8** — per §5.2's S10 concurrency note,
+  `writeStartupCommandWhenShellReady` is gated on shell-ready, not on S8, so
+  a pathological fast exit could in principle race against an
+  already-scheduled command write, entirely on the authorized (post-S5)
+  side of the invariant. This does not change the classification below —
+  authority already transferred at S5 regardless of whether S10 ever ran —
+  and §5.7 already freezes the exact "command delivery status unknown"
+  disposition for this case, reused here rather than re-derived. The
+  precise interleaving is flagged (§21, carried from round 2) as an
+  implementation-time proof obligation for gate 39, not an open
+  correctness question this section leaves unresolved.
 - **Who terminates/reaps the process?** No one needs to — the throw's own
   precondition (`earlyExitedPtyIncarnations.has(ptyId)`) **means the
   process has already exited on its own**; there is nothing live to
@@ -861,6 +1306,77 @@ step runs. Answering the mission's questions exactly:
 **This closes crash-matrix row C6 (§5.5) precisely**: C6 is not a crash at
 all — it is this exact, ordinary, already-real control-flow branch,
 occurring **after** authority has already transferred.
+
+### 7.3 Provider eligibility gate — code-level, not scope discipline (new, round 3)
+
+**Round 2's defect, per the independent rereview:** "local-only scope"
+(§20) was a documented intent, never an enforced check. This section
+freezes a real, code-level gate, reusing an **already-existing capability-probe
+pattern** rather than inventing a new mechanism — `IPtyProvider` already
+declares exactly this shape for two unrelated capabilities:
+
+```ts
+// pty-provider-contract.ts:134,138 — existing precedent, unmodified
+supportsAgentSessionClaims?: (options?: PtyProbeOptions) => boolean | Promise<boolean>
+supportsAgentSessionCreateOperations?: (options?: PtyProbeOptions) => boolean | Promise<boolean>
+```
+
+**New, symmetric capability, same shape:**
+
+```ts
+supportsDelegatedCutoverHold?: (options?: PtyProbeOptions) => boolean | Promise<boolean>
+```
+
+`LocalPtyProvider` declares it `true`. No other provider declares it at
+all (absent ⇒ `undefined` ⇒ treated as `false`, per the existing
+`?.() === false` idiom `spawn-options.ts:154-165` already uses for the two
+precedent capabilities). **Checked before `ORCA_PREPARED_NOT_AUTHORIZED`
+(S2) is ever entered** — mirroring exactly where the two existing
+capability checks already run, in `buildRuntimePtySpawnOptions`:
+
+```ts
+// new, same location and idiom as spawn-options.ts:152-159/160-166
+if (
+  isDelegatedSpawn &&
+  (await (ctx.provider as IPtyProvider).supportsDelegatedCutoverHold?.(...)) !== true
+) {
+  throw new Error('delegated_cutover_provider_unsupported')
+}
+```
+
+**Supported, this slice:** the local PTY provider path proven throughout
+§4 — `LocalPtyProvider` and any path `routesFreshSpawnsToLocalProvider`
+routes there (the same condition §4.1 step 3 already uses to decide
+firing-site threading — reused, not duplicated, so the eligibility gate and
+the firing-site logic can never silently disagree about which spawns are
+"local").
+
+**Unsupported, explicitly, this slice — fail closed before cutover, never
+silent native fallback:**
+
+- remote/SSH execution (out of scope per §20, unchanged) — the daemon-routed
+  provider does not declare the capability;
+- any provider whose spawn-commit chain is not genuinely awaitable end-to-end
+  per §4.5's corrected contract — a provider declaring the capability
+  without actually implementing the async contract is a future
+  implementation defect this gate cannot detect by construction (a
+  capability declaration is a claim, not a proof) — the acceptance gates
+  (§19, gate 41-class) must independently verify `LocalPtyProvider`'s own
+  declaration is honest, not merely that the flag exists;
+- any provider that can pre-deliver the workload (the exact defect §4.1a
+  corrects for the local provider specifically) — a future provider must
+  prove the same deferred-delivery property before it may declare this
+  capability; this gate does not and cannot verify that property by itself,
+  it only gates entry on the declaration existing.
+
+**Failure mode:** `delegated_cutover_provider_unsupported` is thrown
+**before** `acquireOrcaFence` is ever called (checked at the earliest point
+`createAgentSession`/`createTerminal` know which provider a request would
+route to) — no fence is acquired, no process is prepared, `AICONTROL_NATIVE`
+is never disturbed. **Never** a silent fallback to native execution for a
+request that asked for delegation — an explicit, typed rejection the caller
+must handle, consistent with "fail closed, never silent" throughout this
+document.
 
 ---
 
@@ -1296,30 +1812,58 @@ a hypothetical one.
 
 ---
 
-## 18. Prerequisite classification (`PRE_IMPLEMENTATION` vs. `PRE_LIVE_ACTIVATION`) — corrected round 2
+## 18. Prerequisite classification (`PRE_IMPLEMENTATION` vs. `PRE_LIVE_ACTIVATION`) — corrected round 3
 
 Two genuinely different kinds of "not yet true" appear in this document.
-Round 1 conflated them under one label; this revision separates them
-explicitly, per the mission's own distinction.
+Round 1 conflated them under one label; round 2 separated them but its own
+`PRE_IMPLEMENTATION` part (§18.1) was itself underspecified in two ways an
+independent rereview found (§4.1a's argv blocker; §4.5's fake-await gap).
+Both are now closed. Per the mission's explicit instruction, the
+`PRE_IMPLEMENTATION` prerequisite is now stated as **two named parts that
+together form the first implementation sub-slice**, not one.
 
-### 18.1 `PRE_IMPLEMENTATION_PREREQUISITE: AWAITABLE / HELD PTY SPAWN-COMMIT SEAM`
+### 18.1 `PRE_IMPLEMENTATION_PREREQUISITE`
 
-The corrected seam (§4.3-§4.7) — widening `onPtySpawnCommitted`'s signature,
-awaiting it inside `spawnLocalPty`, and adding the teardown-on-rejection
-branch — must be **implemented and independently proven** (RED/GREEN,
-restart-harness-proven for crash windows C1-C7/X15-X16) **before** the rest
-of Slice-B's cutover mechanism can be built on top of it, because every
-later mechanism (the durable transaction itself, §5.4; the crash-window
-table, §5.5-§5.6; the authority table, §16) assumes this seam already
-exists and behaves as specified. This SPEC now defines that seam completely
-enough to implement directly — call graph (§4.1), firing-site table (§4.2),
-chosen seam and rationale (§4.3), resolved workload-timing question (§4.4),
-full await/failure semantics (§4.5), reentrancy/latency analysis (§4.6), and
-duplicate-delivery idempotence (§4.7). **This SPEC states explicitly: the
-seam can be implemented as the first vertical sub-slice of Slice B, without
-needing further separate architectural discovery** — everything an
-implementation session needs is named: exact files, exact lines, exact
-signatures, exact failure branches.
+**Part A — `DELEGATED_DEFERRED_COMMAND_DELIVERY`** (§4.1a/§4.1b): the
+`deferDelegatedCommandDelivery` flag threaded from the delegated call path
+down through `createLocalPtyLaunchPlan`/`createWindowsLocalPtyLaunchPlan`,
+forcing the codebase's own already-existing "command not embeddable" branch
+unconditionally, so `startupCommandDeliveredInShellArgs` is provably always
+false for a delegated spawn and the shell's own bootstrap behavior is
+proven inert with respect to the delegated workload.
+
+**Part B — `TRUE_ASYNC_SPAWN_COMMIT_PROPAGATION`** (§4.5): the full
+callback type-site widening (thirteen sites named exactly, §4.5.1), the
+async-aware fire-once guard replacing both existing boolean guards
+identically (§4.5.2), and the `DelegationCutoverCommitResult`
+evidence-not-authority contract (§4.5.3) — plus the teardown-on-rejection
+branch (§4.5, unchanged in substance from round 2) and the provider
+eligibility gate (§7.3).
+
+**Together, Parts A and B must be implemented and independently proven**
+(RED/GREEN, restart-harness-proven for crash windows C0-C7/X15-X16, §14)
+**before** the rest of Slice-B's cutover mechanism can be built on top of
+them, because every later mechanism (the durable transaction, §5.4; the
+full crash-window table, §5.5-§5.9; the authority table, §16) assumes both
+already exist and behave as specified. **This SPEC states explicitly: an
+implementer can now proceed on both parts without further architectural
+decisions about:**
+
+- **argv delivery** — §4.1a names the exact flag, the exact functions it
+  threads through, and the exact existing branches it forces;
+- **shell/bootstrap inertness** — §4.1b traces every supported shell's
+  actual launch args and states the precise, scoped inertness claim;
+- **callback Promise propagation** — §4.5.1's table names every site, with
+  no "and similar callers" gap;
+- **duplicate async guard semantics** — §4.5.2 gives a complete, literal
+  reference implementation shape for both guard layers;
+- **provider eligibility** — §7.3 names the exact capability, its shape,
+  and where it is checked;
+- **command-release recovery** — §5.7-§5.9 freeze the exact contract for
+  every crash/uncertainty window this correction introduces.
+
+Everything an implementation session needs is named: exact files, exact
+lines, exact signatures, exact failure branches, exact new fields.
 
 ### 18.2 `PRE_LIVE_ACTIVATION` dependencies (implementation may proceed; live cutover may not)
 
@@ -1464,6 +2008,79 @@ round 1:**
     identity-recovery outcome — reused from gate 8, re-exercised specifically
     against the corrected seam's own crash windows (C1-C7).
 
+**New gates, round 3 — deferred command delivery + true await propagation
+(§4.1a-§4.1b, §4.5, §7.3), not present in round 2:**
+
+41. **Windows delegated local launch never embeds the delegated startup
+    command in argv** — an integration test exercising the **real**
+    `createWindowsLocalPtyLaunchPlan` → `buildWindowsPowerShellSpawnAttempts`
+    path (not a mocked shim) with `deferDelegatedCommandDelivery: true` and
+    a command short enough to have been embedded absent the flag, asserting
+    the resulting `shellArgs` never contain the command text.
+42. `startupCommandDeliveredInShellArgs` is `false`/absent for every
+    delegated spawn, across all three shell families (`cmd.exe`,
+    PowerShell/`pwsh.exe`, and the non-Windows POSIX branch), exercised as
+    a parameterized test over the real launch-plan functions.
+43. The delegated bootstrap shell is exercised against §4.1b's proven-inert
+    claim directly — a test confirming no delegated-workload-controlled
+    content reaches the process before `writeStartupCommandWhenShellReady`
+    fires (distinct from gate 41: this proves inertness of the *bootstrap
+    phase itself*, not just absence from argv).
+44. Every one of §4.5.1's thirteen callback sites preserves the Promise —
+    a type-level test (`tsc` conformance) plus a runtime test injecting a
+    slow (artificially delayed) durable-transaction mock and asserting the
+    delay is observable at the outermost await (`create-terminal.ts:179`'s
+    corrected `await`), proving no intermediate layer silently discards it.
+45. First callback invocation exposes exactly one in-flight Promise — a
+    test asserting `state.phase transitions idle → in_flight` exactly once
+    per underlying callback invocation, both guard layers (§4.5.2).
+46. Duplicate invocation while in-flight awaits the **same** Promise object
+    (referential/resolution equality, not merely equal outcome) — exercised
+    concurrently at both guard layers.
+47. **The outer callback cannot report success before the durable
+    transaction completes** — a test that delays the nested (site #12)
+    transaction and asserts the outer (site #9) `await` does not resolve
+    until the delayed transaction actually settles, closing the exact gap
+    an independent rereview found in round 2.
+48. Callback rejection propagates through every guard — a test that makes
+    the real application callback (site #5) reject, asserting both guard
+    layers (site #6, site #10) and the nested invocation (site #12) all
+    observe the rejection, and the outer invocation (site #9) observes the
+    **same cached** rejection (duplicate-after-failure semantics, §4.5.2).
+49. Workload command delivery is impossible until durable cutover commit —
+    an integration test spanning the full local path (§4.1) with a durable
+    commit that never resolves (hung transaction simulation), asserting
+    `writeStartupCommandWhenShellReady` is never reached.
+50. Cutover committed + command not yet delivered is restart-safe without a
+    second process — §5.7's exact scenario, proven via a separate-child-process
+    restart harness: kill the host between S6 and S10, restart, assert the
+    sweep recovers the same process identity (or honestly terminally
+    reconciles it if gone) and never calls `spawnShellWithFallback` again
+    for this `correlation_id`.
+51. Failure before commit vs. after commit uses the correct
+    authority-specific cleanup — §5.8's two branches each independently
+    proven: a pre-commit failure never leaves `orca_fence_state='cutover'`;
+    a post-commit failure never calls `safeReleaseOrcaFence`.
+52. Unsupported provider is rejected before cutover — §7.3's gate, proven
+    against a stub provider that does not declare
+    `supportsDelegatedCutoverHold`, asserting `acquireOrcaFence` is never
+    called.
+53. No remote/SSH provider can enter delegated authority in this slice — a
+    static audit confirming the daemon-routed/remote provider path never
+    declares `supportsDelegatedCutoverHold`.
+54. Early bootstrap death cannot cause automatic respawn — §5.9's exact
+    scenario, both the pre-commit and post-commit sub-cases, each proven
+    via a restart harness asserting zero additional `spawnShellWithFallback`
+    calls.
+55. **The acceptance suite exercises the real default Windows local-PTY
+    launch plan, not only a synthetic stdin-delivery path** — per the
+    mission's own explicit instruction; every gate above that touches
+    launch-plan behavior (41, 42, 43, 49) must run against
+    `createWindowsLocalPtyLaunchPlan`'s real PowerShell-default branch at
+    least once, not exclusively against a command already too long/quoted
+    to embed (which would pass even without `deferDelegatedCommandDelivery`
+    and prove nothing about the fix).
+
 ---
 
 ## 20. Deferred scope, unchanged from ORCA-S1–S4's own boundaries
@@ -1485,18 +2102,23 @@ round 1:**
 
 ---
 
-## 21. Unresolved architecture risks, stated plainly (not concealed) — round 2
+## 21. Unresolved architecture risks, stated plainly (not concealed) — round 3
 
-**Resolved by round 2, removed from this list:** round 1's items 1 and 2
-(whether workload begins before the seam fires; whether the await-ability
-change is safe at its call site) are both resolved — §4.4 independently
-confirms `writeStartupCommandWhenShellReady` cannot run before the chosen
-seam, and §4.6's reentrancy analysis independently confirms the await is
-safe at the nested call site, with the one bounded, named cost (pane-spawn
-reservation latency) and the one bounded, named required addition (the
-teardown-on-rejection branch, §4.5). Round 1's items 3-5 are carried forward
-unchanged below (renumbered), plus one new item this round's deeper tracing
-surfaced.
+**Correction to round 2's own claim in this section:** round 2 asserted its
+item 1 ("whether workload begins before the seam fires") was resolved by
+its §4.4. **That assertion was itself wrong** — an independent focused
+rereview found §4.4's reasoning false against the real Windows argv-embed
+path, exactly the class of error this section exists to prevent by staying
+honest about what is and is not proven. It is genuinely resolved **now**,
+by round 3's §4.1a/§4.1b (a real, additive contract, not a restated
+assumption) — see §4.4's own corrected text for the honest account of what
+changed and why. Round 2's item 2 (the await-ability change's safety at its
+call site) is also now resolved more completely than round 2 claimed:
+round 2 named one call site; round 3's §4.5.1 names all thirteen and
+§4.5.2 gives a literal, implementable guard shape for the two that
+actually needed behavioral change. Round 2's items 1-5 (renumbered 1-5
+below) are otherwise carried forward unchanged, plus one new item this
+round's deeper tracing surfaced (item 6).
 
 1. **§12:** whether aiControl authors the timeout SLA value (copied, never
    recomputed, at cutover) is stated as an assumption carried from the
@@ -1514,20 +2136,31 @@ surfaced.
    the ones named explicitly above (`pre_cutover_orphan_process`,
    `unclassifiable_terminal_status`) are frozen; an implementation session
    may need more, each requiring the same non-fabrication discipline.
-4. **§7.2, new this round:** whether a pathologically fast process exit can
+4. **§7.2/§5.7, carried:** whether a pathologically fast process exit can
    race `writeStartupCommandWhenShellReady`'s own scheduling (both occur
    after S6, neither strictly ordered against the other by anything this
-   SPEC traced) is flagged, not resolved — it does not change §7.2's
-   classification (the process is confirmed dead either way, cleanup is the
-   same), but the exact interleaving was not proven, only argued not to
-   matter. Required as an implementation-time proof obligation (§19 gate 39
-   covers its observable consequence; the interleaving itself is not
-   separately gated).
-5. **§4.2's second table row** (any provider `spawn-options.ts:176-182`
+   SPEC traced) is flagged, not resolved — it does not change §7.2's or
+   §5.7's classification (the process is confirmed dead either way, cleanup
+   is the same), but the exact interleaving was not proven, only argued not
+   to matter. Required as an implementation-time proof obligation (§19
+   gates 39/50 cover its observable consequence; the interleaving itself is
+   not separately gated).
+5. **§4.2's third table row** (any provider `spawn-options.ts:176-182`
    excludes) was explicitly out of this correction's scope (Slice B is
-   local-only, §20) and was not traced. If Slice B's local-only boundary is
-   ever revisited, that row's "not traced this session" must be resolved
-   first — carried forward, not newly introduced.
+   local-only, §20) and was not traced. §7.3's eligibility gate now
+   structurally prevents such a provider from ever entering delegated
+   authority regardless — but its own internal safety properties (whether
+   it could pre-deliver a workload, whether its spawn-commit chain is
+   awaitable) remain untraced, carried forward, not newly introduced.
+6. **§7.3, new this round:** the eligibility gate verifies a **declared**
+   capability (`supportsDelegatedCutoverHold`), not a **proven** one — a
+   future provider could declare the capability without actually
+   satisfying §4.1a/§4.5's contracts. This SPEC does not and cannot close
+   that gap by architecture alone (§7.3 says so explicitly); it requires
+   the acceptance gates (§19, especially the gate-41-class ones) to
+   independently verify `LocalPtyProvider`'s own declaration is honest, and
+   any future provider claiming the same capability must clear the same
+   gates before its declaration can be trusted.
 
 ---
 

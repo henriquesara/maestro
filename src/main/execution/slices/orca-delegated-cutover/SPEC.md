@@ -26,7 +26,7 @@
 > minimize diff.
 
 **State class:** `ARCHITECTURE_READY_FOR_FOCUSED_REREVIEW`.
-**Display verdict:** `ORCA_S5_DELEGATED_CUTOVER_DEFERRED_DELIVERY_ARCHITECTURE_READY_FOR_REREVIEW`.
+**Display verdict:** `ORCA_S5_DELEGATED_CUTOVER_ASYNC_CALL_GRAPH_CORRECTED_READY_FOR_REREVIEW`.
 
 > **Correction history — round 2.** A fresh, independent review of
 > `ef699e9fc29f8a9950234d1460907b435b86c87e` (round 1) returned
@@ -62,6 +62,33 @@
 > R3/`DIVERGENCE` classification, one-instance/no-respawn discipline, and
 > every area round 1's review had already accepted — is preserved unchanged
 > below except where this round's two corrections directly touch it.
+>
+> **Correction history — round 4 (this revision).** A third fresh,
+> independent, focused rereview of round 3 returned
+> `ARCHITECTURE_CHANGES_REQUIRED` on exactly one new blocking class: §4.5.1's
+> "every occurrence in the repository" inventory was itself incomplete. It
+> was built by grepping the literal identifier `onPtySpawnCommitted`, which
+> — by construction — cannot find a site that carries the same logical
+> operation under a different name. Independent symbol/call-graph tracing
+> (not grep) found four such sites, all real, all live, all reachable from
+> the delegated path: `spawn-execute.ts:88`'s direct
+> `ctx.reportPtySpawnCommitted()` call in the `agentSessionEnsure` branch;
+> `spawn-execute.ts:148`'s `onFreshSpawn: ctx.reportPtySpawnCommitted`
+> forwarding in the non-`agentSessionEnsure` branch; and the `onFreshSpawn`
+> callback's own type declaration and invocation in `stable-owner.ts:169`
+> and `stable-owner.ts:302`. Two further type/initializer sites for the same
+> guard-layer-2 slot (`spawn-state.ts:80,183`) were also missing. This
+> revision replaces §4.5.1's table with a nineteen-site inventory built by
+> tracing the logical operation through its return type, its aliases, and
+> every callback parameter and struct field carrying it — not by re-grepping
+> one name — and freezes the propagation contract for every newly found
+> site (§4.5.1a, §4.5.2, §4.7). Every conclusion round 3's independent
+> review confirmed accurate — the Windows argv/bootstrap correction (§4.1a/
+> §4.1b), the chosen nested seam (§4.3), the atomic transaction (§8.1), the
+> authority-result contract (§4.5.3), the crash-window dispositions (§5.5-
+> §5.9), the provider eligibility gate (§7.3), and every area rounds 1-3
+> already accepted — is preserved unchanged below except where this round's
+> single correction directly touches it.
 
 ---
 
@@ -91,6 +118,7 @@
 - Maestro (round 2, the real provider call graph, §4): `src/main/ipc/pty/runtime/spawn-options.ts` (full, `buildRuntimePtySpawnOptions`), `src/main/providers/local-pty-spawn.ts` (full, `spawnLocalPty`), `src/main/providers/local-pty-session-activation.ts` (`activateLocalPtySession`'s exit-listener wiring and startup-command delivery, read for the specific call sites cited in §4), `src/main/runtime/orca-runtime-register-pty.ts` (`assertPtyDidNotExitBeforeRegistration`, full).
 - Maestro (round 3, the Windows launch-plan/argv layer and full callback type-site inventory, §4.1a/§4.5): `src/main/providers/local-pty-launch-plan.ts` (full), `src/main/providers/windows-shell-fallback-chain.ts` (full), `src/main/providers/windows-shell-args.ts` (full — `getCmdShellArgStartupCommand`, `getPowerShellEncodedCommand`, `resolveWindowsShellLaunchArgs`), `src/main/providers/local-pty-provider.ts:67`'s own doc comment, `src/main/providers/pty-provider-contract.ts` (full — `PtySpawnOptions.onPtySpawnCommitted`, `supportsAgentSessionClaims`/`supportsAgentSessionCreateOperations` capability-probe precedent), `src/main/runtime/runtime-terminal-contracts.ts:55`, `src/main/runtime/runtime-pty-controller-contract.ts:71`, `src/main/ipc/pty/runtime/spawn-state.ts:115`, `src/main/ipc/pty/pane/stable-owner.ts:213-234` (`attachStablePaneOwner`, confirming the reattach-only path is out of scope).
 - aiControlCenter (`origin/master`, read-only, via `git show`): `docs/HANDOFF.md`, `docs/architecture/orca-delegation-fence-prerequisite.md` (full, all 16 sections), `src/lib/agent-runner/orca-fence.ts` (full, 284 lines), `src/lib/agent-runner/orca-fence-projection.ts` (full, 96 lines), `src/app/api/agent-runs/[id]/cancel/route.ts` (full, 151 lines, round 2, §12).
+- Maestro (round 4, complete logical spawn-commit call-graph tracing, §4.5.1): `src/main/ipc/pty/runtime/spawn-execute.ts` (full, `executeRuntimePtySpawn`), `src/main/ipc/pty/pane/stable-owner.ts` (full — `StablePaneSpawnContext`, `attachStablePaneOwner`, `spawnForStablePane`), `src/main/ipc/pty/runtime/spawn-state.ts` (full — `RuntimePtySpawnState`'s own `reportPtySpawnCommitted` field and its default initializer), `src/main/ipc/pty/runtime/spawn-options.ts` (full, re-read against the call graph rather than only the type table), `src/main/runtime/orca-runtime-create-agent-session.ts:210-228` (the real application callback's two call sites into `createTerminal`), a repository-wide symbol search for `reportPtySpawnCommitted`, `onFreshSpawn`, and `createPtySpawnCommitReporter` (not `onPtySpawnCommitted` alone).
 
 Unlike the rejected candidate (whose §0 header stated its local aiControlCenter
 checkout was stale and could not read the amendment fresh), **this session
@@ -517,7 +545,7 @@ satisfies the mission's invariant for the local delegated path, on
 evidence traced this round specifically to falsify or confirm it — not
 merely re-asserted.
 
-### 4.5 True Promise propagation — corrected end-to-end, round 3
+### 4.5 True Promise propagation — corrected end-to-end, round 4
 
 **Round 2's defect, confirmed by independent rereview:** round 2 widened
 only `spawn-options.ts`'s `PtySpawnOptions.onPtySpawnCommitted` and
@@ -527,10 +555,20 @@ guard closures the callback actually passes through, both of which are
 `await args.onPtySpawnCommitted?.()` at `local-pty-spawn.ts:89` would
 therefore resolve to `undefined` **immediately**, regardless of how long
 the real durable transaction takes — the await would exist syntactically
-and do nothing semantically. This section corrects that end-to-end, per
-mission 12's explicit "do not say 'and similar callers' — name every site."
+and do nothing semantically. Round 3 corrected that.
 
-#### 4.5.1 Complete callback type-site inventory (every occurrence in the repository)
+**Round 3's own defect, confirmed by independent rereview:** round 3's
+§4.5.1 table was titled "every occurrence in the repository" but was built
+by grepping the single literal identifier `onPtySpawnCommitted`. That
+method cannot find a site that carries the identical logical operation
+under a different name — and two such names exist in real, live code:
+`ctx.reportPtySpawnCommitted` (guard layer 2's own bound closure, stored
+and read back under that name, not `onPtySpawnCommitted`) and
+`onFreshSpawn` (the parameter name `spawn-execute.ts` and `stable-owner.ts`
+use for the exact same value). §4.5.1a below states the corrected discovery
+method; §4.5.1 replaces round 3's table with the complete result.
+
+#### 4.5.1 Complete callback type-site inventory (every occurrence in the repository, traced by symbol/call graph, not by name)
 
 | # | Site | Current type/behavior | Classification | Required change |
 | --- | --- | --- | --- | --- |
@@ -543,21 +581,66 @@ mission 12's explicit "do not say 'and similar callers' — name every site."
 | 7 | `orca-runtime-create-terminal.ts:31` — `reportPtySpawnCommitted = createPtySpawnCommitReporter(launchOpts.onPtySpawnCommitted)` | construction call | Wiring, unchanged shape | Return type follows #6's widened signature |
 | 8 | `orca-runtime-create-terminal.ts:167-168` — threads `reportPtySpawnCommitted` into `ptyController.spawn(...)`'s options | passthrough | Wiring, unchanged | Follows #6's widened signature |
 | 9 | `orca-runtime-create-terminal.ts:178-180` — **outer** invocation `if (!result.stablePaneOwner) { reportPtySpawnCommitted() }` | fire-and-forget call | **Outer duplicate invocation** | Must become `await reportPtySpawnCommitted()`, but per §4.5.2 this always resolves to the **cached** result from the nested firing for a local-PTY delegated spawn — it must never be treated as a fresh attempt, and its resolved value must never be reported as success independent of that cached result (closes the mission's explicit "outer callback cannot report success before durable transaction completes" concern, gate 47) |
-| 10 | `spawn-options.ts:59-66` — the **second**, inline fire-once guard (`ctx.reportPtySpawnCommitted`, guard **layer 2**) | `(): void => { if (ptySpawnCommitReported) return; ptySpawnCommitReported = true; args.onPtySpawnCommitted?.() }` | **Fire-once wrapper — must become async-aware** | §4.5.2 — this is the layer actually threaded into the provider (site #12) |
-| 11 | `spawn-options.ts:176-182` — threads `ctx.reportPtySpawnCommitted` into `ctx.spawnOptions.onPtySpawnCommitted`, provider-conditionally | passthrough | Wiring, unchanged | Follows #10's widened signature |
+| 10 | `spawn-options.ts:59-66` — the **second**, inline fire-once guard (`ctx.reportPtySpawnCommitted`, guard **layer 2**) | `(): void => { if (ptySpawnCommitReported) return; ptySpawnCommitReported = true; args.onPtySpawnCommitted?.() }` | **Fire-once wrapper — must become async-aware** | §4.5.2 — this is the layer read back by sites #12, #16, #17 below |
+| 11 | `spawn-options.ts:176-182` — threads `ctx.reportPtySpawnCommitted` into `ctx.spawnOptions.onPtySpawnCommitted`, provider-conditionally (`LocalPtyProvider` / `routesFreshSpawnsToLocalProvider` only) | passthrough | Wiring, unchanged | Follows #10's widened signature |
 | 12 | `local-pty-spawn.ts:89` — **the chosen seam**, `args.onPtySpawnCommitted?.()` | fire-and-forget call | **The actual nested invocation** | Becomes `const commitResult = await args.onPtySpawnCommitted?.()`, branching per §4.5.3/§7 |
 | 13 | `stable-owner.ts:233` — `attachStablePaneOwner` explicitly sets `onPtySpawnCommitted: undefined` | reattach-only path (`attachOnly: true`, `command: undefined`) | **Out of scope, confirmed** | No change — this path never creates a new process and never carries a delegated command; it cannot originate a `delegation_cutover` and is excluded by §7.3's eligibility gate reasoning (a reattach is not a new authoritative execution instance) |
+| 14 | `spawn-state.ts:80` — `RuntimePtySpawnState.reportPtySpawnCommitted` — guard layer 2's own slot on the shared spawn context, read back by sites #16/#17, not by name `onPtySpawnCommitted` | `() => void` | Type-only declaration, **missed by every name-grep of `onPtySpawnCommitted`** | Widen to `() => Promise<DelegationCutoverCommitResult \| void>`, matching #10's widened signature exactly (same closure) |
+| 15 | `spawn-state.ts:183` — `createRuntimePtySpawnState`'s default initializer `reportPtySpawnCommitted: () => {}` | synchronous void no-op, overwritten by #10 before any real spawn logic runs | Wiring, unchanged in effect | Becomes `async () => {}` (or an equivalent already-resolved no-op) so the placeholder satisfies #14's widened type before `buildRuntimePtySpawnOptions` replaces it |
+| 16 | `spawn-execute.ts:88` — `ctx.reportPtySpawnCommitted()`, called directly inside the `agentSessionEnsure.spawn` closure immediately after `providerResult = await ctx.provider.spawn(ctx.spawnOptions)` | fire-and-forget call, return discarded | **Second, outer-of-the-provider invocation of guard layer 2 — missed by round 3's table entirely** | Becomes `const commitResult = await ctx.reportPtySpawnCommitted()`. For an eligible (`LocalPtyProvider`) delegated spawn this is always a **duplicate-after-settled** read of the same cached result site #12 already produced inside `ctx.provider.spawn(...)` — never a second transaction attempt (§4.5.2's cache makes this true regardless of ordering). For any other provider (`spawn-options.ts:176-182`'s condition excludes it from #11's wiring, so site #12 never fires for it), this is the **first and only** real firing, and must observe the identical first-invocation/duplicate discipline §4.5.2 defines — it must never be a floating, unobserved Promise either way |
+| 17 | `spawn-execute.ts:148` — `onFreshSpawn: ctx.reportPtySpawnCommitted`, passed by reference into `spawnForStablePane(...)` in the non-`agentSessionEnsure` branch | passthrough by reference | **Guard layer 2 forwarded under an alias — missed by round 3's table entirely** | Wiring, unchanged reference; the same closure as site #10, now typed per #18's widening; its invocation is site #19, not this line |
+| 18 | `stable-owner.ts:169` — `StablePaneSpawnContext.onFreshSpawn?: (result: PtySpawnResult) => void` | `?: (result: PtySpawnResult) => void` | Type-only declaration, **the alias's own type — missed by every grep of `onPtySpawnCommitted`** | Widen to `?: (result: PtySpawnResult) => Promise<DelegationCutoverCommitResult \| void> \| void` — the union keeps every existing caller that never passes this option, or passes a void-returning one, valid unchanged |
+| 19 | `stable-owner.ts:302` — `args.onFreshSpawn?.(result)`, inside `spawnForStablePane`, only on the fresh-spawn branch (`args.owner` absent, or `attachStablePaneOwner` returned `null`) | fire-and-forget call, return discarded | **The alias's own invocation — missed by round 3's table entirely** | Becomes `const commitResult = await args.onFreshSpawn?.(result)`. `await`ing a `void`/`undefined` return resolves immediately, so every existing non-delegated caller (which passes no `onFreshSpawn`, or a plain `() => void` one) is unaffected — the smallest additive change satisfying mission 5 |
 
-**Invocation-order clarification (unchanged from round 2, restated for
-precision against this table):** for a `LocalPtyProvider` delegated spawn,
-site #12 (nested, inside `spawnLocalPty`) invokes guard layer 2 (site #10),
-which — on its first, real invocation — invokes guard layer 1 (site #6),
-which invokes the real application callback (site #5). Guard layer 1's
-**own** cached Promise is what site #9 (the outer call) later observes.
-Both guard layers must independently cache and re-return/re-await the
-**same** underlying Promise chain — not merely "not error twice" — for the
-await at site #12 to observe genuine completion and for site #9 to observe
-the same already-settled result rather than `undefined`.
+#### 4.5.1a Discovery method — binding architecture rule, added round 4
+
+**Round 3's inventory was produced by grepping one callback identifier
+(`onPtySpawnCommitted`) and was, by construction, blind to every alias,
+forwarded reference, and differently-named parameter carrying the same
+logical value — which is exactly how sites #14-#19 were missed.** This
+SPEC now states the binding method for this document and for the
+implementation/acceptance work that follows it:
+
+> **Async spawn-commit completeness must be verified by tracing the
+> logical operation itself — its return type, its assignments, its
+> parameter and struct-field names, and every function it is passed
+> into or returned from — never by grepping a single callback
+> identifier.** An implementation or review that re-derives this
+> inventory must independently confirm the site count (nineteen, this
+> round) rather than trusting the number carried forward from the prior
+> document, and must specifically search for re-bound closures
+> (`const x = ctx.foo`), differently-named parameters receiving the same
+> value (`onFreshSpawn` here), and type-only declarations of the same
+> slot (`spawn-state.ts:80/183` here) — not only direct invocations.
+
+**Invocation-order clarification, extended for round 4's sites:** for a
+`LocalPtyProvider` delegated spawn taking the `agentSessionEnsure` branch
+(`spawn-execute.ts:64-127`), site #12 (nested, inside `spawnLocalPty`,
+reached because #11 wired guard layer 2 into the provider's own spawn
+options) fires **first**, before `ctx.provider.spawn(...)` at
+`spawn-execute.ts:85` ever resolves; site #16 (`spawn-execute.ts:88`) runs
+immediately after that same call resolves and therefore always observes
+guard layer 2 already `in_flight` or `settled` — never `idle` — so it can
+never start a second logical operation. For the non-`agentSessionEnsure`
+branch (`spawn-execute.ts:128-161`, `spawnForStablePane`), site #12 fires
+the same way (nested inside `args.provider.spawn(args.spawnOptions)` at
+`stable-owner.ts:301`) and site #19 (`stable-owner.ts:302`) is the
+directly-subsequent statement — the same before/after relationship as
+#12/#16, just reached through the alternate branch. On its first, real
+invocation, guard layer 2 (site #10, read back identically by sites #12,
+#16, #17/#19) invokes guard layer 1 (site #6), which invokes the real
+application callback (site #5). Guard layer 1's **own** cached Promise is
+what site #9 (the outer call in `createTerminal`) later observes. **All
+call sites that read guard layer 2 back — #12, #16, and #17/#19 — read the
+literal same closure instance per spawn**, because sites #14/#15 declare
+and default-initialize exactly one `reportPtySpawnCommitted` slot on the
+shared `RuntimePtySpawnState`, and site #10 is the only assignment to it.
+There is one guard-layer-2 instance and one guard-layer-1 instance per
+spawn, no matter how many of #12/#16/#19 execute against it; every guard
+layer must independently cache and re-return/re-await the **same**
+underlying Promise chain — not merely "not error twice" — for every one of
+those call sites to observe genuine completion or the same already-settled
+result, never `undefined`.
 
 #### 4.5.2 Async-aware fire-once guard semantics (both guard layers, identically specified)
 
@@ -620,7 +703,13 @@ Frozen semantics, matching the mission's exact required shape:
 
 Both `createPtySpawnCommitReporter` (site #6) and `spawn-options.ts`'s
 inline guard (site #10) are replaced by this identical shape — two call
-sites, one specified behavior, no divergence between them.
+sites, one specified behavior, no divergence between them. **Round 4
+addendum:** this shape does not change per caller — sites #12, #16, and
+#17/#19 all read back the same site-#10 instance and therefore all observe
+the identical `idle → in_flight → settled|failed` transitions from
+whichever of them happens to run first for a given spawn; no new guard
+instance and no new state machine is introduced by naming the additional
+call sites in §4.5.1.
 
 #### 4.5.3 `DelegationCutoverCommitResult` — evidence of durable state, never authority itself
 
@@ -754,6 +843,27 @@ Restated against the corrected mechanism, for the local-PTY delegated path
   callback delivery is harmless by construction at both layers, including
   the duplicate-after-failure case (§4.5.2 — cached, re-thrown, never
   silently retried).
+
+**Round 4 addendum — the two additional read-back sites named in §4.5.1
+(#16 `spawn-execute.ts:88`, #19 `stable-owner.ts:302`, both reached via
+`onFreshSpawn` at #17 for the latter):** these are not new firing paths,
+they are additional **readers** of the same guard-layer-2 instance #10
+already covers. For the eligible `LocalPtyProvider` delegated spawn, #16
+and #19 each run strictly after the branch's own call into
+`ctx.provider.spawn(...)`/`args.provider.spawn(...)` resolves — which is
+exactly where #12 already fired guard layer 2 nested, inside that same
+call — so both #16 and #19 always observe `in_flight` or `settled`, never
+`idle`, and can never start a second logical operation for a delegated
+spawn. For a provider outside #11's `LocalPtyProvider`/
+`routesFreshSpawnsToLocalProvider` condition (out of Slice B's local-only
+delegation scope, §20, but still real, shared infrastructure code), #16 or
+#19 is the *only* firing — still safe, because it is still routed through
+the identical async-aware guard (§4.5.2) with the identical
+first-invocation/duplicate semantics; it simply plays the role site #12
+plays for the local provider. **Exactly one logical spawn-commit protocol
+executes per authoritative production execution identity remains true
+across all five read-back sites (#9, #12, #16, #17/#19), not merely the
+two round 3 named.**
 
 ---
 
@@ -1019,7 +1129,13 @@ not (A) or (B):**
 
 §4.5's teardown-on-rejection branch is now split explicitly by **when** the
 failure/uncertainty is discovered, per the mission's explicit instruction
-not to let callback rejection alone decide which authority owns cleanup:
+not to let callback rejection alone decide which authority owns cleanup.
+**Round 4 note:** this section is already site-agnostic by design — it
+branches on durable re-read state, never on which of §4.5.1's read-back
+sites (#9, #12, #16, #17/#19) happened to observe the rejection — so
+naming the additional round 4 sites requires no change here; a rejection
+observed at #16 or #19 is cleaned up by exactly the same two branches
+below as one observed at #9 or #12.
 
 **Failure discovered before S5 ever commits** (a `REJECTED_PRE_COMMIT` or a
 thrown exception where a re-read of `delegation_cutover` for this
@@ -1833,12 +1949,14 @@ false for a delegated spawn and the shell's own bootstrap behavior is
 proven inert with respect to the delegated workload.
 
 **Part B — `TRUE_ASYNC_SPAWN_COMMIT_PROPAGATION`** (§4.5): the full
-callback type-site widening (thirteen sites named exactly, §4.5.1), the
-async-aware fire-once guard replacing both existing boolean guards
-identically (§4.5.2), and the `DelegationCutoverCommitResult`
-evidence-not-authority contract (§4.5.3) — plus the teardown-on-rejection
-branch (§4.5, unchanged in substance from round 2) and the provider
-eligibility gate (§7.3).
+callback type-site widening (nineteen sites named exactly, §4.5.1, derived
+by logical call-graph/symbol tracing per §4.5.1a — not thirteen, and not
+by re-grepping one identifier), the async-aware fire-once guard replacing
+both existing boolean guards identically (§4.5.2, now explicitly read back
+by every one of the nineteen sites, §4.7), and the
+`DelegationCutoverCommitResult` evidence-not-authority contract (§4.5.3) —
+plus the teardown-on-rejection branch (§5.8, site-agnostic by design) and
+the provider eligibility gate (§7.3).
 
 **Together, Parts A and B must be implemented and independently proven**
 (RED/GREEN, restart-harness-proven for crash windows C0-C7/X15-X16, §14)
@@ -1853,8 +1971,9 @@ decisions about:**
   threads through, and the exact existing branches it forces;
 - **shell/bootstrap inertness** — §4.1b traces every supported shell's
   actual launch args and states the precise, scoped inertness claim;
-- **callback Promise propagation** — §4.5.1's table names every site, with
-  no "and similar callers" gap;
+- **callback Promise propagation** — §4.5.1's table names every one of the
+  nineteen sites, with no "and similar callers" gap, derived by symbol/
+  call-graph tracing (§4.5.1a) rather than by name-grep;
 - **duplicate async guard semantics** — §4.5.2 gives a complete, literal
   reference implementation shape for both guard layers;
 - **provider eligibility** — §7.3 names the exact capability, its shape,
@@ -2026,11 +2145,12 @@ round 1:**
     content reaches the process before `writeStartupCommandWhenShellReady`
     fires (distinct from gate 41: this proves inertness of the *bootstrap
     phase itself*, not just absence from argv).
-44. Every one of §4.5.1's thirteen callback sites preserves the Promise —
+44. Every one of §4.5.1's nineteen callback sites preserves the Promise —
     a type-level test (`tsc` conformance) plus a runtime test injecting a
     slow (artificially delayed) durable-transaction mock and asserting the
-    delay is observable at the outermost await (`create-terminal.ts:179`'s
-    corrected `await`), proving no intermediate layer silently discards it.
+    delay is observable at every read-back site (`create-terminal.ts:179`,
+    `spawn-execute.ts:88`, `stable-owner.ts:302`), proving no intermediate
+    layer or alias silently discards it.
 45. First callback invocation exposes exactly one in-flight Promise — a
     test asserting `state.phase transitions idle → in_flight` exactly once
     per underlying callback invocation, both guard layers (§4.5.2).
@@ -2081,6 +2201,55 @@ round 1:**
     to embed (which would pass even without `deferDelegatedCommandDelivery`
     and prove nothing about the fix).
 
+**New gates, round 4 — complete async spawn-commit call graph (§4.5.1,
+§4.5.1a), not present in round 3:**
+
+56. Full logical spawn-commit call graph contains no void-discarding
+    alias — a repository-wide static check (a `tsc` conformance test plus a
+    lint rule or code-search assertion) that every symbol reading back
+    guard layer 2 (`RuntimePtySpawnState.reportPtySpawnCommitted`,
+    `StablePaneSpawnContext.onFreshSpawn`) is typed to return
+    `Promise<DelegationCutoverCommitResult | void> | void`, never a bare
+    `void`, and that every invocation of one of those symbols is either
+    awaited or its result is returned to an awaited caller.
+57. `spawn-execute.ts`'s delegated `agentSessionEnsure` path (site #16)
+    awaits and propagates the real commit Promise — a test that delays
+    guard layer 2's underlying settlement and asserts
+    `executeRuntimePtySpawn`'s own returned Promise does not resolve until
+    that settlement completes, exercised specifically through the
+    `agentSessionEnsure` branch (not only through `local-pty-spawn.ts:89`
+    in isolation, which gate 44 already covers).
+58. `onFreshSpawn` (`stable-owner.ts:169`) preserves the async result on
+    the delegated path — a type-level test asserting the widened signature
+    accepts an `async` callback without a cast, plus a runtime test
+    asserting a rejection thrown by the underlying guard is observable at
+    `onFreshSpawn`'s call site.
+59. Every `stable-owner.ts` `onFreshSpawn` invocation (site #19) awaits or
+    propagates according to contract — a test asserting
+    `spawnForStablePane`'s own returned Promise does not resolve until a
+    delayed `onFreshSpawn` settles, and that a rejection from `onFreshSpawn`
+    propagates to `spawnForStablePane`'s caller rather than being swallowed.
+60. All aliases (sites #10, #12, #16, #17/#19) resolve to the same single
+    in-flight Promise per execution identity — a concurrency test that
+    triggers two or more of these call sites for the same spawn (where the
+    branch structure allows it) and asserts referential/resolution equality
+    of the observed result, not merely equal outcome.
+61. A rejected durable Promise cannot become an unhandled rejection — a
+    test that makes the real application callback (site #5) reject and
+    asserts zero `unhandledRejection` process events across every code path
+    that reads back guard layer 2, including the `agentSessionEnsure` and
+    `spawnForStablePane` branches added this round.
+62. No alias can let spawn flow continue after commit failure — an
+    integration test asserting that a rejection observed at site #16 or
+    site #19 prevents `executeRuntimePtySpawn`/`spawnForStablePane` from
+    returning a result that downstream code (PTY registration, reveal)
+    would treat as a live, authoritative spawn.
+63. Implementation acceptance performs a symbol/call-graph audit, not a
+    literal-name grep only — a standing CI or review-checklist gate
+    (§4.5.1a) requiring any future change to the spawn-commit protocol to
+    re-derive and state the current site count from source, rather than
+    copying the number from the prior SPEC revision.
+
 ---
 
 ## 20. Deferred scope, unchanged from ORCA-S1–S4's own boundaries
@@ -2114,11 +2283,13 @@ by round 3's §4.1a/§4.1b (a real, additive contract, not a restated
 assumption) — see §4.4's own corrected text for the honest account of what
 changed and why. Round 2's item 2 (the await-ability change's safety at its
 call site) is also now resolved more completely than round 2 claimed:
-round 2 named one call site; round 3's §4.5.1 names all thirteen and
-§4.5.2 gives a literal, implementable guard shape for the two that
-actually needed behavioral change. Round 2's items 1-5 (renumbered 1-5
-below) are otherwise carried forward unchanged, plus one new item this
-round's deeper tracing surfaced (item 6).
+round 2 named one call site; round 3's §4.5.1 named thirteen, built by
+grepping one identifier — **itself an incomplete method, independently
+found this round:** round 4's §4.5.1 names all nineteen, derived by
+symbol/call-graph tracing (§4.5.1a), and §4.5.2 gives a literal,
+implementable guard shape read back identically by every one of them.
+Round 2's items 1-5 (renumbered 1-5 below) are otherwise carried forward
+unchanged, plus one new item round 3's deeper tracing surfaced (item 6).
 
 1. **§12:** whether aiControl authors the timeout SLA value (copied, never
    recomputed, at cutover) is stated as an assumption carried from the
@@ -2173,6 +2344,15 @@ opening check (§ Artifact identity table): `data/app.db` SHA-256
 zero times for write; every aiControl fact above was read via `git show
 origin/master:<path>` against tracked source files only.
 
+**Round 4 re-verification:** this correction touched only Maestro's
+`SPEC.md`; it made no aiControl claim and needed no new aiControl read.
+Independently re-hashed `data/app.db` in the local aiControlCenter
+checkout read-only (`sha256sum`) before committing this revision:
+`2dc6f32a86e42b6cd42e93712af73e33fc39053b3ec2b6265566ac0580a45088` —
+**unchanged**, no `-wal`/`-shm`/journal file present. `origin/master`
+re-fetched and re-confirmed at `ab5967bdde5115afe6673e8b520a73cfb29f0eaf`,
+matching the mission's required canonical value exactly.
+
 ---
 
 ## 23. Predecessor facts consumed
@@ -2219,5 +2399,5 @@ decision (§20).
 
 ---
 
-_State class: `ARCHITECTURE_READY_FOR_INDEPENDENT_REVIEW`._
-_Display verdict: `ORCA_S5_DELEGATED_CUTOVER_ARCHITECTURE_CORRECTED_READY_FOR_REVIEW`._
+_State class: `ARCHITECTURE_READY_FOR_FOCUSED_REREVIEW`._
+_Display verdict: `ORCA_S5_DELEGATED_CUTOVER_ASYNC_CALL_GRAPH_CORRECTED_READY_FOR_REREVIEW`._

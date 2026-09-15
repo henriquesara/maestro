@@ -28,13 +28,44 @@ import type { DelegationCutoverCommitResult } from './delegation-cutover-commit-
  *  a synchronous reentrant call -- `callback` calling this same reporter
  *  before returning -- observes no cached state yet and re-invokes
  *  `callback`. Installing the pending Promise first makes both cases
- *  converge on the one already-installed operation. */
+ *  converge on the one already-installed operation.
+ *
+ *  Why a synchronous reentrant call POISONS the operation instead of
+ *  quietly converging on it: `callback` can return -- directly, or
+ *  indirectly through any wrapper (e.g. `async () => reporter()`) that
+ *  *adopts* a reentrant call's eventual settlement -- a value that depends
+ *  on this same in-flight `promise`. Adopting that value into `promise`
+ *  (`promise.then(resolve, reject)` on itself, materially) creates a
+ *  resolution cycle: `promise` can only settle via `resolve`/`reject`,
+ *  which are only reachable as a reaction to `promise` itself settling --
+ *  it never does, and the operation hangs forever with no observable
+ *  failure. A check for `callbackResult === promise` cannot catch the
+ *  wrapper-adoption shape, since the wrapper's own returned Promise is a
+ *  distinct object. Tracking synchronous reentry *as an event*, rather
+ *  than inspecting what the callback returns, closes both shapes: any
+ *  reentrant call observed while `callback` is still synchronously
+ *  executing means `callback`'s eventual return value can no longer be
+ *  trusted to be independent of `promise`, so it is never adopted --
+ *  `promise` is rejected with a stable internal identity instead, and the
+ *  now-orphaned callback result (if it is a Promise) gets a harmless
+ *  no-op rejection handler so it can never surface as an unhandled
+ *  rejection once it settles per whatever it depended on. */
 export function createAsyncSpawnCommitReporter(
   callback?: () => Promise<DelegationCutoverCommitResult> | void
 ): () => Promise<DelegationCutoverCommitResult | void> {
   let promise: Promise<DelegationCutoverCommitResult | void> | undefined
+  let invokingCallback = false
+  let reentryObserved = false
   return (): Promise<DelegationCutoverCommitResult | void> => {
     if (promise) {
+      if (invokingCallback) {
+        // A synchronous reentrant call: the operation cannot converge
+        // safely on whatever `callback` eventually returns (see the doc
+        // comment above) -- mark it so the outer invocation poisons
+        // `promise` instead of adopting that result. Still returns the
+        // SAME sentinel, still invokes `callback` zero additional times.
+        reentryObserved = true
+      }
       return promise
     }
     let resolve!: (value: DelegationCutoverCommitResult | void) => void
@@ -49,10 +80,33 @@ export function createAsyncSpawnCommitReporter(
     // `promise` instead of escaping uncached; a synchronous reentrant call
     // into this same reporter observes `promise` above and returns it
     // without a second invocation.
+    invokingCallback = true
+    let callbackResult: Promise<DelegationCutoverCommitResult> | void = undefined
+    let threw = false
+    let thrownError: unknown
     try {
-      Promise.resolve(callback?.()).then(resolve, reject)
+      callbackResult = callback?.()
     } catch (error) {
-      reject(error)
+      threw = true
+      thrownError = error
+    }
+    invokingCallback = false
+    if (reentryObserved) {
+      // Fail closed: never adopt a result that a synchronous reentrant
+      // call may have influenced. If that result is itself a Promise,
+      // attach a no-op rejection handler so its eventual settlement
+      // (which may well be this same rejection, adopted) can never
+      // surface as an unhandled rejection.
+      if (!threw) {
+        Promise.resolve(callbackResult).then(undefined, () => {})
+      }
+      reject(new Error('spawn_commit_reporter_synchronous_reentrancy'))
+      return promise
+    }
+    if (threw) {
+      reject(thrownError)
+    } else {
+      Promise.resolve(callbackResult).then(resolve, reject)
     }
     return promise
   }

@@ -140,3 +140,115 @@ Files changed in this commit:
 No production code changed. No SPEC change. No `delegation_cutover`
 persistence, fence acquisition, authority transfer, settlement, projection,
 or M5 work in this commit.
+
+## Focused GREEN #2 — implementation
+
+`src/shared/async-spawn-commit-reporter.ts`: adds two closure-local flags,
+`invokingCallback` and `reentryObserved`, alongside the existing sentinel:
+
+- `invokingCallback` is `true` for exactly the synchronous duration of the
+  first (and only) `callback?.()` invocation.
+- Any call to the returned reporter function that observes an existing
+  `promise` **while `invokingCallback` is true** sets `reentryObserved =
+  true` before returning the existing sentinel unchanged (still zero
+  additional callback invocations, still the same object returned).
+- After `callback?.()` returns or throws, if `reentryObserved` is true, the
+  operation is poisoned: the sentinel is rejected with `new
+  Error('spawn_commit_reporter_synchronous_reentrancy')` regardless of
+  whether the callback threw, returned normally, or returned a
+  Promise -- and if the callback did return a Promise/thenable, a no-op
+  `.then(undefined, () => {})` is attached to it first so its eventual
+  settlement (which may well be this exact rejection, adopted through a
+  wrapper) can never surface as an unhandled rejection.
+- Absent reentry, all prior behavior (sync-throw caching, async
+  pending/success/failure propagation, void-callback success) is
+  unchanged.
+
+This is a synchronous-reentry-observation design, not a
+`callbackResult === sentinel` identity check -- required because an `async`
+wrapper around a reentrant call produces a *distinct* Promise object that
+still depends on the sentinel, which an identity check cannot see.
+
+## Focused GREEN #2 — verification
+
+All three RED #2 cases now pass, plus every pre-existing test in the file,
+run 4 times back-to-back with no flakiness observed:
+
+```
+node node_modules/vitest/vitest.mjs run --config config/vitest.config.ts \
+  src/shared/async-spawn-commit-reporter-synchronous-safety.test.ts
+```
+```
+Test Files  1 passed (1)
+     Tests  11 passed (11)
+```
+
+Full focused seam suite (same 7 files as focused GREEN #1's evidence):
+```
+Test Files  7 passed (7)
+     Tests  38 passed (38)
+```
+(33 from focused GREEN #1 + 5 new/updated in this fix: 3 new adversarial
+cases, 1 new sync-throw-without-reentry regression guard, 1 new
+unhandled-rejection robustness check. The pre-existing "synchronous-
+reentrancy safety (blocker 1b)" test's assertion count is unchanged at 1
+test, now asserting rejection instead of resolution.)
+
+**Typecheck:** `node node_modules/typescript/bin/tsc --noEmit -p config/tsconfig.node.json`
+-- exits 0. Two categories of fix were required to reach this: (1) the
+reporter's own `callbackResult` needed an explicit `= undefined`
+initializer for TS's definite-assignment analysis across the try/catch
+split: it could not otherwise prove the variable was assigned in every path
+that reads it; (2) three test-file callbacks that return `reporter()`
+directly (or through an `async` wrapper) needed an explicit
+`as Promise<DelegationCutoverCommitResult>` cast, since a bare `reporter()`
+call's return type (`Promise<DelegationCutoverCommitResult | void>`) does
+not structurally match the callback parameter's declared type
+(`Promise<DelegationCutoverCommitResult> | void`) -- an existing,
+pre-fix-#2 type mismatch inherent to this adversarial shape, not a defect
+introduced by the reporter fix. No `any`/`@ts-ignore`/disabled lint.
+
+**Changed-code quality:** `node config/scripts/check-changed-code-quality.mjs`
+-- 0 new findings (code quality, type-aware code quality, React Doctor)
+across 22 changed files, gate passed since `7c1796e82c53`.
+
+**Native-timing regression:** `local-pty-provider-spawn-session.test.ts` --
+16/16 passed, unaffected (this fix only touches
+`async-spawn-commit-reporter.ts`; `local-pty-spawn.ts` is untouched).
+
+**S1-S4 execution-slice regression:** `src/main/execution/slices` --
+19 passed + 2 skipped test files, 78 passed + 11 skipped tests, 0 failed --
+byte-identical to the established baseline. (Run combined with the
+native-timing file above: 20 passed + 2 skipped files / 94 passed + 11
+skipped tests total, matching 19+1 files and 78+16 tests exactly.)
+
+**A genuine test-authoring gap found and fixed during this work, not a
+production defect:** while writing RED #2, the previously-accepted
+"synchronous-reentrancy safety (blocker 1b)" test's final
+`return expect(outer).resolves.toBe(DUMMY_RESULT)` line was removed (since
+the tightened contract requires that shape to reject), but no replacement
+assertion was added in the same edit -- leaving `outer`'s now-expected
+rejection completely unobserved by that test. This surfaced as a real,
+reproducible (non-flaky once isolated) `Vitest caught 1 unhandled error`
+failure attributed to a *different*, later test in the same file (Node's
+unhandled-rejection detection is not synchronous with the originating
+test's completion, so the failure surfaced with a misleading "latest test"
+attribution). Fixed by awaiting
+`expect(outer).rejects.toThrow('spawn_commit_reporter_synchronous_reentrancy')`
+in that test. A second, related timing note: the "indirect self-dependency"
+test's async-wrapper-adopted Promise settles via a microtask job that is
+not guaranteed to complete before the test function returns; a trailing
+20 ms real-timer wait was added at the end of that test so its own
+Promise-adoption chain cannot bleed into a subsequent test's
+`unhandledRejection` listener window. Neither of these was a defect in
+`async-spawn-commit-reporter.ts` itself -- both were test-file hygiene gaps
+this session found and closed while proving the fix.
+
+## Scope (final, GREEN #2 commit)
+
+Production: `src/shared/async-spawn-commit-reporter.ts` only (as required --
+no second production file needed). Tests:
+`src/shared/async-spawn-commit-reporter-synchronous-safety.test.ts`
+(the type-error and unhandled-rejection fixes above landed in this commit,
+on top of RED #2's already-committed new tests). Evidence: this file
+(additive). No changes to `local-pty-spawn.ts`, SPEC.md, or any other file.

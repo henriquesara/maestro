@@ -99,7 +99,7 @@ describe('createAsyncSpawnCommitReporter: synchronous-throw safety (blocker 1a)'
 })
 
 describe('createAsyncSpawnCommitReporter: synchronous-reentrancy safety (blocker 1b)', () => {
-  it('a synchronously reentrant call observes the SAME in-flight sentinel -- exactly one underlying invocation, no recursion', () => {
+  it('a synchronously reentrant call observes the SAME in-flight sentinel -- exactly one underlying invocation, no recursion', async () => {
     let invocationCount = 0
     let reentrantResult: Promise<DelegationCutoverCommitResult | void> | undefined
     let reporter!: () => Promise<DelegationCutoverCommitResult | void>
@@ -127,6 +127,13 @@ describe('createAsyncSpawnCommitReporter: synchronous-reentrancy safety (blocker
     // recursion) -- this much is unchanged by FIX #2.
     expect(invocationCount).toBe(1)
     expect(reentrantResult).toBe(outer)
+    // FIX #2's tightened contract: this callback ignores the reentrant
+    // call's result and otherwise returns a distinct successful value --
+    // exactly the shape that now poisons the operation (see the dedicated
+    // "reentrancy-with-ignored-result" test below for the full contract
+    // assertion). Awaited here too so `outer`'s rejection is never left
+    // unhandled by this test.
+    await expect(outer).rejects.toThrow('spawn_commit_reporter_synchronous_reentrancy')
   })
 })
 
@@ -142,7 +149,11 @@ describe('createAsyncSpawnCommitReporter: reentrant self-dependency / Promise-cy
       // shown (against ce0521e2a6) to make `Promise.resolve(callback?.())
       // .then(resolve, reject)` register the sentinel's own resolver as a
       // reaction to itself, which then never fires.
-      return reporter()
+      // Cast: the reentrant call's Promise never actually resolves to a
+      // real `DelegationCutoverCommitResult` on this adversarial path (it
+      // is always poisoned/rejected) -- only its `void`-union placement
+      // differs from the callback's declared return type.
+      return reporter() as Promise<DelegationCutoverCommitResult>
     })
 
     const outer = reporter()
@@ -172,7 +183,7 @@ describe('createAsyncSpawnCommitReporter: reentrant self-dependency / Promise-cy
       // eventual settlement is entirely adopted from (depends on) that same
       // sentinel -- a solution based only on `callbackResult === sentinel`
       // is blind to this shape.
-      return reporter()
+      return reporter() as Promise<DelegationCutoverCommitResult>
     })
 
     const outer = reporter()
@@ -183,6 +194,12 @@ describe('createAsyncSpawnCommitReporter: reentrant self-dependency / Promise-cy
       expect(outcome.settled).toBe('rejected')
     }
     expect(invocationCount).toBe(1)
+    // Lets the async wrapper's own Promise (a distinct object from the
+    // sentinel, adopting it via a deferred PromiseResolveThenableJob) fully
+    // settle before this test ends, so its settlement can't be observed as
+    // a cross-test-timing artifact by a later test's own unhandledRejection
+    // listener (see the dedicated unhandled-rejection test below).
+    await new Promise((resolve) => setTimeout(resolve, 20))
   })
 
   it('reentrancy-with-ignored-result: synchronous reentry poisons the operation even when the callback otherwise completes normally', async () => {
@@ -241,7 +258,7 @@ describe('createAsyncSpawnCommitReporter: reentrant self-dependency / Promise-cy
       let reporter!: () => Promise<DelegationCutoverCommitResult | void>
       reporter = createAsyncSpawnCommitReporter(async () => {
         invocationCount++
-        return reporter()
+        return reporter() as Promise<DelegationCutoverCommitResult>
       })
 
       await settleOrHang(reporter())

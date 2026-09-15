@@ -6,6 +6,13 @@
 > (`TRUE_ASYNC_SPAWN_COMMIT_PROPAGATION`, §4.5), per §18.1. No production
 > code is implemented by this session. `ORCA_DELEGATED` remains `NOT
 > STARTED`; fence acquisition remains disabled; M5 is untouched.
+>
+> **Completion round 2** (commit after `0a1bf4c2654ff9cb334c90b1f0ff7bd97e9d7492`):
+> gate 60 was corrected from `LATER_SLICE_B` to genuine `PRE_IMPLEMENTATION`
+> RED — it does not require the `delegation_cutover` table; it is provable
+> at the runtime seam with a controllable injected Promise, exactly like
+> gates 44-48. §4 and §5 below reflect the correction; all other sections
+> are unchanged from round 1.
 
 ## 1. Pre-flight
 
@@ -98,9 +105,10 @@ as PRE_IMPLEMENTATION RED evidence.
 | `src/main/ipc/pty/runtime/spawn-options-commit-guard-async.test.ts` | E (guard layer 2) | 11, 44, 46, 48, 61 | 4 | 1 (fire-once invocation count already correct) |
 | `src/main/ipc/pty/runtime/spawn-execute-commit-propagation.test.ts` | G, H, K, L, M | 47, 48, 57, 59, 61, 62 | 3 | 0 |
 | `src/main/ipc/pty/runtime/spawn-options-delegated-cutover-capability-gate.test.ts` | D, P | 52 | 1 | 1 (documents `LocalPtyProvider` doesn't declare the capability either, yet) |
+| `src/main/ipc/pty/runtime/spawn-execute-cross-alias-promise-convergence.test.ts` | I, J | 60 | 2 | 0 (underlying-invocation-count-stays-1 and site-#11-referential-equality are asserted as real preconditions *within* each RED test, not as a separate passing test — see §4a) |
 | `src/main/execution/slices/orca-delegated-cutover/spawn-commit-type-conformance-red.ts` (type-checked only, `pnpm tc:node`) | E (type-level, sites #1/#2/#3/#4/#14/#18) | 44 (type half), 56 | 6 `@ts-expect-error` markers, all currently load-bearing (`pnpm tc:node` exits 0) | — |
 
-**Total runtime RED: 15 failing assertions across 19 vitest tests (4 passing
+**Total runtime RED: 17 failing assertions across 21 vitest tests (4 passing
 positive controls), plus 6 load-bearing `@ts-expect-error` type-level RED
 markers.**
 
@@ -180,6 +188,76 @@ itself — this slice's only intended-eligible provider — does not declare the
 capability yet either, so implementing §7.3 correctly requires adding the
 declaration to `LocalPtyProvider`, not only the gate check.
 
+### RED Area I/J (round 2) — cross-alias Promise convergence, gate 60
+
+**Corrected this round.** Round 1 classified gate 60 `LATER_SLICE_B`,
+reasoning that no site carries a Promise today so there was "nothing to
+compare identity of." That reasoning conflated *"the current values happen
+to both be `undefined`"* with *"there is no contract to violate."* The
+frozen contract (§4.5.1a's closing paragraph) is precisely that every real
+alias reading back guard layer 2 must observe the same in-flight
+operation — and that is independently testable today with an injected
+deferred Promise at the real `args.onPtySpawnCommitted` seam, exactly like
+gates 44-48. No `delegation_cutover` storage is needed: the "durable
+operation" gate 60 cares about is the *logical* commit operation guard
+layer 2 wraps, not its eventual SQL persistence — persistence is a
+downstream consumer of the same Promise, not a precondition for testing
+that the Promise itself converges.
+
+`spawn-execute-cross-alias-promise-convergence.test.ts` crosses **two
+different real, unmocked production call sites for one execution
+identity**, not two calls to the same wrapper (which the guard-layer files
+already cover):
+
+- **Site #12** (`local-pty-spawn.ts:89`) — simulated by a stub
+  `IPtyProvider.spawn` that calls `ctx.spawnOptions.onPtySpawnCommitted?.()`
+  **unawaited**, exactly as `spawnLocalPty` really does, before resolving.
+  The rest of `LocalPtyProvider`'s real internals (node-pty, launch-plan
+  resolution) are not re-exercised here — they are already covered end-to-end
+  by `local-pty-provider-delegated-command-delivery.test.ts` for the Windows
+  argv contract; this file's subject is guard convergence, not argv.
+- **Site #16** (`spawn-execute.ts:88`) — the real, unmocked
+  `executeRuntimePtySpawn`'s direct `ctx.reportPtySpawnCommitted()` call,
+  fired immediately after `ctx.provider.spawn(...)` resolves.
+
+Both sites are proven, structurally, to read back the **literal same guard
+layer 2 closure instance** before being wrapped for observation
+(`expect(ctx.spawnOptions.onPtySpawnCommitted).toBe(ctx.reportPtySpawnCommitted)`
+— real, passes today, site #11's wiring). A thin recording wrapper is
+installed around that real closure (delegating to it unchanged) so both
+real call sites' return values can be observed without altering either
+site's own logic.
+
+**Test 1 (success path).** Injects a deferred Promise as the "durable
+operation." Runs the real flow through both sites. Confirms, as real
+preconditions reached *before* the RED assertion:
+- `observedReturns.length === 2` — both real aliases fired.
+- `underlyingInvocations === 1` — **GREEN, preserved**: the underlying
+  operation is invoked exactly once across the two real aliases (guard
+  layer 2's boolean flag already prevents a second real invocation).
+
+Then the genuine RED: `observedReturns[0]` must be `instanceof Promise`
+(fails — `undefined`, so the “same Promise” assertion that follows is
+`undefined === undefined`, deliberately gated behind the `toBeInstanceOf`
+check first so an accidental trivial pass can never masquerade as gate 60
+being satisfied); `executeRuntimePtySpawn` must not resolve before the
+injected Promise settles (fails — it resolves immediately, `executeSettled`
+is `true` before `resolveDurable()` is ever called).
+
+**Test 2 (failure path).** Same two-alias setup, underlying operation
+rejects. Confirms `underlyingInvocations === 1` (GREEN — no alias retried)
+and `observedReturns.length === 2`, then the genuine RED: neither call
+site's return value is a Promise, and `executeRuntimePtySpawn` never
+throws/rejects — the rejection is fully absorbed and lost. The rejected
+promise is captured and explicitly `.catch()`-ed in the test itself so this
+never depends on process-level `unhandledRejection` timing, per this task's
+own instruction.
+
+Both tests fail today at exactly `expect(observedReturns[0]).toBeInstanceOf(Promise)`
+— the precise, single point where the frozen cross-alias contract is
+violated, with every precondition up to that point (cross-alias invocation,
+single underlying call, no retry) independently confirmed true first.
+
 ### Areas not covered by a dedicated new test file this session
 
 - **Area C (nested seam location decision)** — a design decision already
@@ -188,20 +266,6 @@ declaration to `LocalPtyProvider`, not only the gate check.
   through that exact call site.
 - **Area F (async callback type contract)** — folded into Area E above (the
   type-conformance file + the runtime guard tests together satisfy this).
-- **Area I/J (fire-once guard layers, same-Promise-through-aliases)** — the
-  *invocation-count* half is proven GREEN (already correct) by the
-  "invariant preserved" positive controls in both guard-layer test files;
-  the *same-Promise-object* half is proven RED by the "duplicate
-  invocation while in-flight" tests in both files. A dedicated
-  multi-alias-convergence test (sites #12+#16+#17/#19 observing literally
-  the same Promise for one execution identity, §4.5.1a's own closing
-  requirement, gate 60) was not added as a separate file — `spawn-execute-commit-propagation.test.ts`'s
-  two branch tests each independently confirm no-await at the relevant
-  alias, which is the load-bearing half of gate 60 for this seam; full
-  cross-branch convergence is naturally proven once Part B is implemented
-  and gate 60's own acceptance test is written against the real
-  implementation, since today none of the sites carry a Promise at all to
-  compare identity of.
 - **Areas K/L/M/N (no floating rejection, no early continuation, commit
   failure blocks release, deferred command release)** — K and M are proven
   by `spawn-execute-commit-propagation.test.ts`'s rejection test (Area M is
@@ -241,7 +305,7 @@ declaration to `LocalPtyProvider`, not only the gate check.
 | 57 | `agentSessionEnsure` branch (site #16) awaits and propagates | **RED** — `spawn-execute-commit-propagation.test.ts` |
 | 58 | `onFreshSpawn` type (site #18) preserves async result | **RED** (type half) — type-conformance file; runtime half folded into gate 59 |
 | 59 | Every `onFreshSpawn` invocation (site #19) awaits/propagates | **RED** — `spawn-execute-commit-propagation.test.ts` |
-| 60 | All aliases resolve to the same in-flight Promise per execution identity | Not independently proven this session — see §4 "Areas not covered" above; no site carries a Promise today, so there is nothing to compare identity of yet. `LATER_SLICE_B` follow-up once Part B lands. |
+| 60 | All aliases resolve to the same in-flight Promise per execution identity | **RED** (corrected round 2 from `LATER_SLICE_B`) — `spawn-execute-cross-alias-promise-convergence.test.ts`, crossing real sites #12 and #16 for one execution identity; see §4 "RED Area I/J (round 2)" above |
 | 61 | Rejected durable Promise cannot become an unhandled rejection | **RED**, proven deterministically (captured-promise + explicit `.catch()` pattern, never relying on process-level `unhandledRejection` timing, per this task's own instruction) across all three propagation-focused test files |
 | 62 | No alias lets spawn flow continue after commit failure | **RED** — `spawn-execute-commit-propagation.test.ts`'s rejection test |
 | 63 | Implementation acceptance performs symbol/call-graph audit, not grep-only | Satisfied **by process**, this session: §2's trace was built by following the logical operation through aliases/wrappers/type slots, independently re-deriving the same 19-site count the frozen SPEC states, not by re-grepping `onPtySpawnCommitted`. Documented here as the standing discipline for any future session touching this seam. |

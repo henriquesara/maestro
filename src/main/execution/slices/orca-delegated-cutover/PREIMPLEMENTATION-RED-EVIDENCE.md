@@ -96,6 +96,24 @@ worktree — nothing to do with PTY spawn, delegated cutover, or any file this
 session touched). Per this task's own instruction, these are **not** counted
 as PRE_IMPLEMENTATION RED evidence.
 
+## 3a. ERRATA / PUBLICATION CLARIFICATION (added during docs-only closeout)
+
+§3's "16 test files failed, 857 passed, 5 skipped (878 total); 32 tests
+failed, 8797 passed, 67 skipped (8902 total)" is a **scoped regression
+sweep** limited to three directories
+(`src/main/providers src/main/ipc/pty src/main/runtime`), not the
+complete repository test suite. The repository's actual test-file
+universe is substantially larger — a direct count during this closeout
+session found **8,058** `*.test.ts`/`*.test.tsx` files repository-wide,
+against the 878 files this sweep covered. The scoped numbers themselves
+were correctly reproduced for their selected scope and remain accurate
+*as a scoped sweep*; they should not be read as, and were never intended
+to represent, the complete repository test universe. Per the final
+independent acceptance record, a real repository-wide suite run was
+additionally performed and found no failure trace attributable to the
+accepted technical delta; the known-failing files remained the
+pre-existing Windows path-separator family already called out above.
+
 ## 4. New RED test files (this session, additive only)
 
 | File | Area(s) | Gates | RED | Preserved (GREEN) |

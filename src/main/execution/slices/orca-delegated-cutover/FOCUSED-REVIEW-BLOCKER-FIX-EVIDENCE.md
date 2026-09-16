@@ -268,6 +268,21 @@ but is a strict improvement, not a regression, and no new file appears in
 this run's failure list that was absent from the recorded baseline's own
 16.
 
+**ERRATA / PUBLICATION CLARIFICATION (added during docs-only closeout):**
+the "15 files failed / 864 passed / 5 skipped (884); 30 tests failed / 8826
+passed / 67 skipped (8929)" figures above are a **scoped regression
+sweep** over three directories
+(`src/main/providers src/main/ipc/pty src/main/runtime`), not the
+complete repository test suite. A direct count during docs-only closeout
+found **8,058** `*.test.ts`/`*.test.tsx` files repository-wide — the
+scoped sweep's 884 files is a small subset of that. The scoped numbers
+were correctly reproduced for their selected scope and remain accurate as
+such. Per the final independent acceptance record, a real repository-wide
+suite run was additionally performed and found no failure trace
+attributable to the accepted technical delta; known spot-check failures
+remained the pre-existing Windows path-separator family already
+enumerated above.
+
 Two of the exact failures observed in this run
 (`local-pty-shell-startup-command.node-pty.test.ts`'s "No test found in
 suite" and `local-pty-shell-ready-wrapper-generation.test.ts`'s

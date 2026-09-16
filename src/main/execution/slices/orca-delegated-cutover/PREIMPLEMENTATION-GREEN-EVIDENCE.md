@@ -245,6 +245,20 @@ skipped (884 total); 32 tests failed / 8821 passed / 67 skipped (8926
 total)** — file-for-file and test-count-for-test-count identical to the
 RED session's own recorded pre-existing baseline.
 
+**ERRATA / PUBLICATION CLARIFICATION (added during docs-only closeout):**
+the "16 files / 862 passed / 5 skipped (884 total); 32 tests failed /
+8821 passed / 67 skipped (8926 total)" figures above are a **scoped
+regression sweep** over three directories
+(`src/main/providers src/main/ipc/pty src/main/runtime`), not the
+complete repository test suite. A direct count during docs-only closeout
+found **8,058** `*.test.ts`/`*.test.tsx` files repository-wide — the
+scoped sweep's 884 files is a small subset of that. The scoped numbers
+were correctly reproduced for their selected scope and remain accurate as
+such. Per the final independent acceptance record, a real repository-wide
+suite run was additionally performed and found no failure trace
+attributable to the accepted technical delta; known spot-check failures
+remained the pre-existing Windows path-separator family.
+
 **Independently verified, not just count-matched:** two of the sixteen
 files whose failures are not obviously platform/path-separator noise
 (`structured-agent-session-integration.test.ts`,

@@ -252,3 +252,31 @@ no second production file needed). Tests:
 (the type-error and unhandled-rejection fixes above landed in this commit,
 on top of RED #2's already-committed new tests). Evidence: this file
 (additive). No changes to `local-pty-spawn.ts`, SPEC.md, or any other file.
+
+## Accepted residual — ASYNC_LATE_SELF_DEPENDENCY (added during docs-only closeout)
+
+Classification: `UNREACHABLE_IN_CURRENT_PRODUCTION_CALLBACK_GRAPH_ACCEPTED_RESIDUAL`.
+
+- Synchronous callback reentry is now fail-closed: covered and accepted by
+  this fix (§"Tightened frozen contract" and the RED #2 / GREEN #2 sections
+  above), for both direct and indirect self-dependency shapes.
+- A callback that first re-enters its own reporter only **asynchronously**,
+  after the initial synchronous invocation phase has already returned, can
+  theoretically still form an unresolved dependency cycle (the reporter has
+  no way to distinguish that shape from an ordinary, valid duplicate caller
+  joining an already in-flight operation).
+- This behavior is pre-existing and was not introduced by either focused
+  fix in this file.
+- No current production spawn-commit callback captures or re-enters its own
+  reporter this way — the shape is not reachable through any real call site
+  in today's call graph (§2 of `PREIMPLEMENTATION-RED-EVIDENCE.md`'s trace).
+- Poisoning every later async duplicate to close this theoretical shape
+  would conflict with the valid semantics of an ordinary duplicate caller
+  joining an in-flight operation, and was rejected on that basis.
+- This is not claimed to be impossible in the abstract — only unreachable
+  in the current production callback graph.
+
+**Future trigger:** if production ever introduces a callback capable of
+asynchronously capturing and re-entering its own reporter after the
+synchronous phase, this residual must be revisited before that path is
+accepted.

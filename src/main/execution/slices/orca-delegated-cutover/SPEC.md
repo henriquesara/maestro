@@ -26,7 +26,38 @@
 > minimize diff.
 
 **State class:** `ARCHITECTURE_READY_FOR_FOCUSED_REREVIEW`.
-**Display verdict:** `ORCA_S5_DELEGATED_CUTOVER_ASYNC_CALL_GRAPH_CORRECTED_READY_FOR_REREVIEW`.
+**Display verdict:** `ORCA_S5_DELEGATED_CUTOVER_COMPOSITION_ROOT_CORRECTED_READY_FOR_REREVIEW`.
+
+> **Correction history — round 5 (this revision).** A full independent
+> architecture review of everything from §5 onward (`ARCHITECTURE-INDEPENDENT-REVIEW-001.md`,
+> `f2817e2b1fe5000aae5cefe5354974d2ba2542b3` — content preserved unmodified
+> alongside this SPEC) returned `ARCHITECTURE_CHANGES_REQUIRED` on exactly one
+> blocking class: this document traced the PTY/runtime call graph (§4) and
+> specified the Execution-owned schema (§8) in isolation, but never named the
+> real composition root connecting them — which live module invokes the
+> durable bind+cutover transaction from inside the callback §4.5.1 site #5
+> hosts, and where/when the `run_reservation` row every other Execution-store
+> FK in §8 chains to gets created, since §5.4's transaction never inserts one
+> itself. A dedicated technical-discovery pass (`CUTOVER-COMPOSITION-ROOT-DISCOVERY-001.md`,
+> `b828655e6b6951d27d20346e2c343ec354720466` — also preserved unmodified
+> alongside this SPEC) traced the real current call graph and Execution-side
+> composition against live code and found the real, already-shipping
+> precedent this correction adopts: `OrcaRuntimeWithFenceAutomationOwner`'s
+> lazily-owned, memoized, application-lifetime `OrchestrationDb` (`getOrchestrationDb()`),
+> reused as the pattern for a new `DelegatedCutoverCoordinator` (§4.8). Every
+> conclusion the independent review confirmed sound — the fence handshake
+> (§6), the atomic transaction's structural feasibility (§5.4/§8.1), schema
+> (§8), cardinality (§11), cross-DB protocol (§9/§14), cancellation/timeout
+> (§12/§15), terminal projection (§10/§17), the authority table (§16), and
+> every area rounds 1-4 already accepted — is preserved unchanged below
+> except where this round's single correction directly touches it: a new §4.8
+> naming the coordinator/composition root, a corrected §4.5.1 site #5 row, a
+> corrected §5.2 S2 state adding `run_reservation` creation, a corrected §5.4
+> naming the invoker, and minimal, additive notes to §5.5's crash-window
+> table and §19's gate classifications. This round does not itself freeze,
+> accept, publish, or authorize implementation of anything — it remains
+> `ARCHITECTURE_READY_FOR_FOCUSED_REREVIEW`, per the same discipline every
+> prior round has followed.
 
 > **Correction history — round 2.** A fresh, independent review of
 > `ef699e9fc29f8a9950234d1460907b435b86c87e` (round 1) returned
@@ -576,7 +607,7 @@ method; §4.5.1 replaces round 3's table with the complete result.
 | 2 | `runtime-pty-controller-contract.ts:71` — the options type `ptyController.spawn(...)` accepts | `?: () => void` | Type-only declaration | Same widening |
 | 3 | `pty-provider-contract.ts:109` — `PtySpawnOptions.onPtySpawnCommitted` | `?: () => void` | Type-only declaration | Same widening |
 | 4 | `spawn-state.ts:115` — `RuntimePtySpawnState`'s `spawnOptions.onPtySpawnCommitted` | `?: () => void` | Type-only declaration | Same widening |
-| 5 | `orca-runtime-create-agent-session.ts:225-227` — the real application callback (`onPtySpawnCommitted: () => { retainReplayFence = true }`) | synchronous, in-memory flag write | **The real logical operation's home** — this is where the durable transaction (§7's five-insert commit) must actually run for a delegated spawn | Becomes `async (): Promise<DelegationCutoverCommitResult> => { … }` for a delegated spawn (checked via a capability/mode flag, never by guessing); unchanged (`() => void`, still fires `retainReplayFence = true`) for a non-delegated spawn — the union type accommodates both without a breaking change |
+| 5 | `orca-runtime-create-agent-session.ts:225-227` — the real application callback (`onPtySpawnCommitted: () => { retainReplayFence = true }`) | synchronous, in-memory flag write | **The real logical operation's home, corrected round 5 (§4.8):** for a delegated spawn, this closure's body is `this.getDelegatedCutoverCoordinator().commitDelegatedCutover(...)` — a same-class method call on the `OrcaRuntimeService` composition (§4.8), never a direct import of Execution-store internals into this file | Becomes `async (): Promise<DelegationCutoverCommitResult> => { return this.getDelegatedCutoverCoordinator().commitDelegatedCutover({ aicontrolRunId, fenceToken, correlationId, orcaDispatchId, processIdentity }) }` for a delegated spawn (checked via `request.delegatedCutover`'s presence, §4.8.3 — never by guessing); unchanged (`() => void`, still fires `retainReplayFence = true`) for a non-delegated spawn — the union type accommodates both without a breaking change |
 | 6 | `orca-runtime-report-pty-spawn-commit.ts` — `createPtySpawnCommitReporter` (guard **layer 1**) | `(callback?: () => void) => () => void`; boolean `reported` flag; discards `callback?.()`'s return | **Fire-once wrapper — must become async-aware** | §4.5.2 |
 | 7 | `orca-runtime-create-terminal.ts:31` — `reportPtySpawnCommitted = createPtySpawnCommitReporter(launchOpts.onPtySpawnCommitted)` | construction call | Wiring, unchanged shape | Return type follows #6's widened signature |
 | 8 | `orca-runtime-create-terminal.ts:167-168` — threads `reportPtySpawnCommitted` into `ptyController.spawn(...)`'s options | passthrough | Wiring, unchanged | Follows #6's widened signature |
@@ -865,6 +896,144 @@ executes per authoritative production execution identity remains true
 across all five read-back sites (#9, #12, #16, #17/#19), not merely the
 two round 3 named.**
 
+### 4.8 Composition root — the `DelegatedCutoverCoordinator` (new, round 5, closes the independent review's sole blocker)
+
+Rounds 1-4 traced the PTY/runtime call graph (§4) and specified the
+Execution-owned schema (§8) in isolation, but never named the module that
+bridges them — site #5's own note ("this is where the durable transaction
+must actually run") described a requirement, not an owner. This section
+names it, grounded in `CUTOVER-COMPOSITION-ROOT-DISCOVERY-001.md`'s traced
+evidence, not invented fresh here.
+
+#### 4.8.1 Owner, path, and composition point
+
+**`OrcaRuntimeWithDelegatedCutoverCoordinator`**
+(`src/main/runtime/orca-runtime-delegated-cutover-coordinator.ts`), a new
+mixin participating in `OrcaRuntimeService`'s existing single linear
+mixin chain (`orca-runtime.ts`) — the same chain
+`OrcaRuntimeWithCreateAgentSession` and `OrcaRuntimeWithFenceAutomationOwner`
+already participate in, sharing one `this` at runtime. This is an
+**application/composition responsibility, not a provider/PTY responsibility.**
+It is owned by neither `LocalPtyProvider`, `spawnLocalPty`,
+`buildRuntimePtySpawnOptions`, nor any generic `PtySpawnOptions`/
+`IPtyProvider` contract — none of those files gain a new import.
+
+The coordinator exposes a lazy, memoized accessor,
+`getDelegatedCutoverCoordinator()`, following the real, already-shipping
+precedent `OrcaRuntimeWithFenceAutomationOwner.getOrchestrationDb()` sets:
+constructed on first use (not eagerly at app startup), holding one
+persistent `SyncDatabase`/`ExecutionStore` connection against a durable,
+application-lifetime path (analogous to `getOrchestrationDb()`'s
+`userData/orchestration.db`) — **the same Execution SQLite database**
+`run_binding`, `dispatch_worktree`, `dispatch_process_binding`, and
+`delegation_cutover` already live in or will live in. This is a
+correction of fact, not merely of naming: the only composition root the
+Execution bounded context has today (`executeShadowIdentityObservationSlice`)
+opens a fresh connection, runs one fixed batch, and closes it — structurally
+incompatible with an interactive event of unpredictable timing. The
+coordinator is the first live, persistent owner of an Execution-store
+connection in the running application.
+
+#### 4.8.2 Dependency direction
+
+```
+OrcaRuntimeService composition (existing linear mixin chain)
+    |
+    v
+DelegatedCutoverCoordinator (new mixin, §4.8.1)
+    |                              \
+    v                               v
+Execution application/store     AiControlFenceClientPort (new, §4.8.5)
+(ExecutionStore, txn runner,    outbound adapter — no existing Maestro
+Sqlite*Store — existing,        HTTP client to aiControlCenter's fence
+reused as-is)                   API routes exists today
+    |
+    v
+Execution SQLite (one database)
+
+DelegatedCutoverCoordinator
+    |
+    v
+Runtime / held-execution mechanism (createAgentSession/createTerminal,
+already published)
+    |
+    v
+PTY / provider (local-pty-spawn.ts, spawn-options.ts — UNCHANGED,
+authority-neutral)
+```
+
+**Forbidden, unchanged from discovery:** `src/main/providers/*` and
+`src/main/ipc/pty/*` importing anything from `src/main/execution/*`. The
+provider/PTY mechanism remains authority-neutral — it never learns the
+coordinator, the fence client, or the Execution store exist; it only ever
+awaits the opaque `Promise<DelegationCutoverCommitResult | void>` already
+published in `eed09b3047db4f71d25763c215335a2f2db0b403`.
+
+#### 4.8.3 Identity transport
+
+`RuntimeCreateAgentSessionRequest` gains one small, additive, optional
+field:
+
+```ts
+delegatedCutover?: {
+  aicontrolRunId: string
+  fenceToken: string   // caller-generated, per §6 Phase 1 — never minted by aiControl
+}
+```
+
+Absent for every existing non-delegated caller — no existing call site
+changes shape. `createAgentSession` captures this in the site-#5 closure
+alongside the `correlationId`/`orcaDispatchId`/`operationHandle` identity it
+already mints today (§4.1 step 1) — the closure, not
+`PtySpawnOptions`/`RuntimePtySpawnState`/any type site §4.5.1 widened, is
+where aiControl identity lives. **This field must never propagate into
+`PtySpawnOptions`, `RuntimePtySpawnState`, or any generic provider
+contract** — every one of the nineteen sites §4.5.1 names stays exactly as
+published; the provider remains unaware aiControl or fencing exist.
+
+#### 4.8.4 Spawn-commit callback ownership (corrected, §4.5.1 site #5)
+
+The callback closure is created at the same real site as before (§4.5.1
+site #5). For a delegated request (`request.delegatedCutover` present), its
+body becomes a call to
+`this.getDelegatedCutoverCoordinator().commitDelegatedCutover({ aicontrolRunId, fenceToken, correlationId, orcaDispatchId, processIdentity })`,
+where `processIdentity` is the exact `{ pid, osStartMarker, osStartMarkerSource }`
+the real spawn already produced at the seam (§4.3) — the **same** identity
+the coordinator's transaction commits and the **same** identity release
+later addresses; no second process is ever created to satisfy a retry or
+recovery attempt (§4.9, §11). Successful resolution means the authoritative
+Maestro atomic bind+cutover transaction (§5.4) has **committed**; rejection
+means spawn-commit authorization failed and the held workload **must not**
+be released — both meanings are exactly what site #5's async-aware guard
+contract (§4.5.2, published) already propagates; this section names the
+callback's *body*, not a new propagation mechanism.
+
+#### 4.8.5 `AiControlFenceClientPort` (new)
+
+An outbound port, owned by Execution infrastructure (e.g.
+`execution/infrastructure/aicontrol-fence-client.ts`), used only by the
+coordinator, wrapping the real, published `acquireOrcaFence`/
+`acknowledgeOrcaCutover`/`safeReleaseOrcaFence` HTTP-facing API routes (§6)
+— **no existing Maestro code calls these today**; the only existing
+aiControl-facing code (`aicontrol-db-reader.ts`,
+`native-results-authoritative-executor.ts`) reads `data/app.db` directly
+(read-only, guard-only) or replays canned results for the shadow-observation
+test harness. This port does not live in the provider/PTY layer. Its
+transport details (HTTP client shape, auth, retry) are not specified here —
+narrower than this architecture correction's scope.
+
+#### 4.8.6 Relationship to `RealDelegatedProcessPort` (§7.1)
+
+No overlapping process abstraction is introduced. `RealDelegatedProcessPort`
+(§7.1, already frozen) remains the adapter that receives the real `{ pid,
+incarnationId, osStartMarker, osStartMarkerSource }` at the seam and
+implements ORCA-S4's unmodified `ShadowLifecycleProcessPort` interface. The
+coordinator consumes this identity as a plain value **handed to it by the
+site-#5 closure** (§4.8.4) — it does not itself hold or construct a
+`RealDelegatedProcessPort` instance; the port stays exactly where §7.1
+already places it, inside the runtime/provider seam, never imported by
+Execution infrastructure.
+
 ---
 
 ## 5. The corrected cutover / process-bind ordering (closes item A) — frozen state machine (corrected round 2)
@@ -896,14 +1065,23 @@ S0   NATIVE_ELIGIBLE
 S1   FENCE_ACQUIRED                    [aiControl commit — Phase 1, §6]
        (orca_fence_state='fenced'; authority still AICONTROL_NATIVE; native
         claim/dequeue/direct-claim/execute structurally impossible, §6.2)
-S2   ORCA_PREPARING
+S2   ORCA_PREPARING                       [durable — corrected round 5, §4.8]
        (createAgentSession/createTerminal resolve dispatch/worktree identity
         — the real dispatch worktree itself already durably exists on disk,
         via Maestro's existing, unrelated worktree infrastructure, §13; the
         new dispatch_worktree ROW is not yet written, that happens at S5 —
         preAllocatedHandle minted, and createTerminal sets
         deferDelegatedCommandDelivery: true on the PtySpawnOptions (§4.1a);
-        §4.1 steps 1-2; nothing durable-to-this-slice yet)
+        §4.1 steps 1-2. Corrected round 5: for a delegated request only, the
+        DelegatedCutoverCoordinator (§4.8) writes the ONE durable fact this
+        state introduces — a run_reservation row, under a slice_ref distinct
+        from the shadow-observation slice's own (§8, §4.8.1) — as its own
+        first write, before any process is prepared. This is Execution's
+        internal FK-anchor bookkeeping only, not a second admission/capacity
+        authority: it is written only after S1's fence acquisition already
+        succeeded, and it never gates or duplicates aiControl's own admission
+        decision. A crash here (fence + run_reservation durable, nothing else)
+        leaves authority AICONTROL_NATIVE — §5.5's C0 row, restated)
 S3   LOCAL_PROCESS_SPAWNED             [real side effect — local-pty-spawn.ts:71-88]
        (createLocalPtyLaunchPlan/createWindowsLocalPtyLaunchPlan resolve
         shellArgs FIRST, with the workload command WITHHELD from argv
@@ -995,6 +1173,17 @@ needed correcting before the conclusion could actually hold (§4.4).
 
 ### 5.4 Transaction boundary at S5
 
+**Invoker, corrected round 5 (§4.8):** `DelegatedCutoverCoordinator.commitDelegatedCutover(...)`
+(invoked from site #5's closure, §4.8.4) issues this transaction against the
+**same** `ExecutionStore`/`SyncDatabase` connection it lazily owns (§4.8.1),
+through the existing `ExecutionTransactionRunner.withImmediateTransaction`
+primitive `worktree-provenance-bind-step.ts` already uses for its own
+multi-insert transaction — no new transaction primitive is invented.
+`run_reservation` is deliberately **not** one of this transaction's inserts:
+per S2 (§5.2, corrected round 5), it was already durably written, earlier,
+by the same coordinator, before any process was prepared — this transaction
+only reads/references it via the FK, never re-inserts or upserts it.
+
 ```
 BEGIN IMMEDIATE;
 INSERT run_binding (ORCA-S1, unchanged schema);
@@ -1021,7 +1210,7 @@ instead).
 
 | Window | Point | Durable state | Authority | Process state | Recovery |
 | --- | --- | --- | --- | --- | --- |
-| **C0** | crash during S2 (before any spawn) | nothing durable, no process | `AICONTROL_NATIVE`; fence `fenced` at aiControl (S1 durable) | none exists | retry S2→S3 from scratch; §6 fence path (B) makes a same-token retry idempotent |
+| **C0** | crash during S2 (before any spawn) | **corrected round 5:** `run_reservation` may already be durable (§4.8, §5.2) if the crash lands after the coordinator's own first write; otherwise nothing durable. Either way, no process exists | `AICONTROL_NATIVE`; fence `fenced` at aiControl (S1 durable); a durable `run_reservation` is Execution's own FK-anchor bookkeeping only and never itself moves authority | none exists | retry S2→S3 from scratch; §6 fence path (B) makes a same-token retry idempotent; a pre-existing `run_reservation` for the same `correlation_id` is read/reused, never re-inserted or duplicated |
 | **C1** | crash at S3-S4 boundary (process spawned, `onPtySpawnCommitted` not yet invoked — vanishingly narrow, no `await` between them, but a whole-host crash can land at any instruction) | nothing durable | `AICONTROL_NATIVE` | a real process exists, invisible to every Maestro/Execution-store mechanism | identical disposition to C2 below — §5.6 |
 | **C2** | crash at S4, inside the awaited durable transaction, before it commits | nothing durable (transaction never committed) | `AICONTROL_NATIVE` | a real, unbound process exists | §5.6's fail-closed identity-recovery-then-release path |
 | **C3** | crash exactly at S5 (durable commit lands, host dies before the `await` in `spawnLocalPty` even returns control) | `delegation_cutover` + `dispatch_process_binding` fully durable | `ORCA_DELEGATED` already (S5's own fact) | the real process is still alive (nothing tore it down — no failure occurred) | on restart: the sweep finds a committed binding with no corresponding provider-side activation ever confirmed; §5.6 extends its own recovery primitives to re-adopt it, never respawn |
@@ -1227,7 +1416,10 @@ Authority `AICONTROL_NATIVE`.
 
 **Phase 1 — acquire fence.** Maestro generates `token` (caller-supplied,
 never minted by aiControl — `orca-fence.ts:14`) and calls
-`acquireOrcaFence({ runId, token })`. Its CAS
+`acquireOrcaFence({ runId, token })`, via the `DelegatedCutoverCoordinator`
+(§4.8) through the new `AiControlFenceClientPort` (§4.8.5) — the only place
+in this architecture that calls outward to aiControlCenter's API, never the
+provider/PTY layer. Its CAS
 (`orca-fence.ts:97-105`):
 
 ```sql
@@ -1519,7 +1711,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS delegation_cutover_by_aicontrol_run
 ```
 
 - Written once, at S5, in the same transaction as `run_binding` /
-  `dispatch_worktree` / `dispatch_process_binding` (§5.4).
+  `dispatch_worktree` / `dispatch_process_binding` (§5.4), invoked by the
+  `DelegatedCutoverCoordinator` (§4.8) against the one Execution SQLite
+  database it already holds open — the same database `run_reservation`
+  (§5.2 S2, written earlier, under this sub-slice's own distinct
+  `slice_ref`, never the shadow-observation slice's) already lives in, so
+  no cross-database participant and no new transaction primitive is
+  required (confirmed against `worktree-provenance-bind-step.ts`'s existing
+  multi-insert `withImmediateTransaction` precedent).
 - **SOURCE. Never dropped or regenerated by a projection rebuild** — it *is*
   the authority-transfer fact; a rebuild that could not reproduce it would be
   indistinguishable from silently un-delegating a run.
@@ -1741,6 +1940,25 @@ deliberate retry after confirmed failure) requires a new
 `delegation_cutover` row under a fresh fence token — a distinct future
 protocol this SPEC does not define, exactly as the mission requires.
 
+**Recovery ownership, corrected round 5 (§4.8):** "the sweep" above is owned
+by the same `DelegatedCutoverCoordinator` mixin (§4.8.1) that owns the
+happy-path transaction — it already holds the persistent Execution-store
+connection the sweep must read (`run_reservation`, `run_binding`,
+`dispatch_worktree`, `dispatch_process_binding`, `delegation_cutover`,
+lifecycle facts), and it already shares `this` with the runtime methods that
+call `adoptStablePane`/`reconcileRemoteTerminalCreate`, by the same
+composition reasoning as §4.8.2 — no second, distinct recovery composition
+root is introduced. **The sweep's exact trigger/cadence (a timer? an
+app-start hook? an existing sweep cycle reused?) is explicitly not frozen
+here** — this architecture's correctness invariant does not depend on it:
+whenever the sweep runs, it derives authority exclusively from the durable
+facts above and never spawns a second process under uncertainty, regardless
+of how often or when it runs. Scheduling/cadence is classified
+implementation detail, to be resolved by whichever session designs the
+coordinator in executable detail; it is a liveness concern (how promptly an
+orphan is noticed), never a correctness one (whether an orphan can ever be
+double-spawned or misclassified).
+
 ---
 
 ## 12. Cancellation / timeout authority (cancel-route description corrected, round 2)
@@ -1843,7 +2061,7 @@ retry behavior, and the forbidden action:
 | # | Window | Authority | Durable truth | Retry / reconcile | Forbidden |
 | --- | --- | --- | --- | --- | --- |
 | X1 | Fence request sent, response lost | `AICONTROL_NATIVE` | aiControl: possibly `'fenced'` already (F2, prerequisite §9) | retry with the **same** token — path (B) returns the existing fence deterministically | generating a new token for what the caller believes is the same request |
-| X2 | Fence acquired (S1), Maestro crashes before S2/S3 | `AICONTROL_NATIVE`, blocked | `'fenced'` | resume S2 with the same token | any native admission/claim (already structurally impossible per §3 of the prerequisite) |
+| X2 | Fence acquired (S1), Maestro crashes before S2/S3 | `AICONTROL_NATIVE`, blocked | `'fenced'`; **corrected round 5:** `run_reservation` (§4.8, §5.2 S2) may already be durable if the crash lands after the coordinator's first write — Execution-internal FK-anchor bookkeeping only, never itself authority | resume S2 with the same token; a pre-existing `run_reservation` for this `correlation_id` is reused, never re-inserted | any native admission/claim (already structurally impossible per §3 of the prerequisite); duplicating `run_reservation` for the same identity |
 | X3 | Process spawned (S3-S4), Maestro crashes before S5 commits | `AICONTROL_NATIVE` (S5 never committed) | a real, Execution-store-invisible process may exist | §5.5/§5.6's C1-C2 identity-recovery-then-fail-closed path | an unconditional second spawn |
 | X4 | S5 commits, crash before S9 acknowledgement | `ORCA_DELEGATED` (already true — Maestro's own DB) | `delegation_cutover` durable | retry Phase 4 with the same token (idempotent) | any aiControl-side assumption that native execution is still legal (it never was, from Phase 1) |
 | X5 | S5 commits, aiControl acknowledgement permanently lost | `ORCA_DELEGATED` | aiControl shows `'fenced'` forever unless retried | operator/monitoring must eventually retry Phase 4; Orca's own correctness does not depend on it (§6 Phase 4) | releasing the aiControl-side fence without §6.1's positive evidence (there is none — cutover genuinely happened) |
@@ -1886,7 +2104,7 @@ bookkeeping (`attempt_count`, `last_attempted_at`) while `status='pending'`.
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | `NATIVE_ELIGIBLE` (S0) | aiControl | aiControl | aiControl | aiControl (native) | aiControl | aiControl | aiControl | aiControl | N/A |
 | `FENCED_PRE_CUTOVER` (S1) | aiControl (fence blocks native, §6) | N/A — none started | N/A | aiControl | aiControl | N/A | aiControl (§12) | aiControl | N/A |
-| `ORCA_PREPARING` (S2) | — (in-flight, uncommitted) | N/A | N/A | N/A | N/A | N/A | aiControl (§12) | N/A (nothing durable) | N/A |
+| `ORCA_PREPARING` (S2) | — (in-flight, uncommitted) | N/A | N/A | N/A | N/A | N/A | aiControl (§12) | Execution FK-anchor only — `run_reservation` may already be durable (§4.8, §5.2), never itself an authority/admission fact | N/A |
 | `ORCA_PREPARED_NOT_AUTHORIZED` (S3–S4: real process spawned, then the nested durable-commit hook invoked and in flight — §4.1, §4.3) | — | real process exists, unowned by any Execution-store row (§5.5 C1-C2) | **nobody** — Orca cannot yet, aiControl never | N/A | N/A | N/A | aiControl (still legal — fence not yet cutover) | §5.6's identity-recovery path | N/A |
 | `ORCA_DELEGATED_CUTOVER_COMMITTED` (S5) | frozen (no more admission decisions for this run) | **Orca** | **Orca**, exclusively | Orca reads only, never deletes (§13) | Orca (§9) | **Orca** (§9.3) | **Orca** (§12) | Orca | not yet — no closure |
 | *(S6-S8: execution released, provider activation, outer spawn resolved — mechanical continuation, §5.2)* | frozen | **Orca** — same ownership as S5's row throughout; these are sub-steps of one already-delegated commit, not separate authority states | Orca | Orca (read-only) | Orca | Orca | Orca | Orca | not yet |
@@ -2015,6 +2233,19 @@ deployment or with the projector fix's own independent acceptance.
 ---
 
 ## 19. Acceptance gates (future, executable — not satisfied by this document)
+
+**Round 5 note:** `ARCHITECTURE-INDEPENDENT-REVIEW-001.md` classified gates
+4, 5, 6, 7, 8, 9, 31, 38, 39, 40, 50, 51, 53, 54 `ARCHITECTURE_BLOCKED`
+specifically because they would need to invoke the composition root §4.8 now
+names. That naming is architecture only — none of these gates is satisfied,
+proven, or reclassified GREEN by this correction. They move from
+`ARCHITECTURE_BLOCKED` to the same `ARCHITECTURE_SOUND_IMPLEMENTABLE`
+status every other not-yet-implemented gate in this section already carries,
+pending the independent focused rereview this correction itself requires
+(§24). Every gate the same review already found
+`ALREADY_TECHNICALLY_PROVEN_PREIMPLEMENTATION` (31, 32, 33, 34, 35, 36, 37,
+41-49, 52, 55-63) or `PRE_LIVE_ACTIVATION` (19, 20, 21, 22, 26) is
+unaffected and unchanged by this correction.
 
 1. Real aiControl fence acquisition handshake exercised against the real
    `orca-fence.ts` functions (not a mock), including `ACQUISITION_DISABLED`
@@ -2332,6 +2563,13 @@ unchanged, plus one new item round 3's deeper tracing surfaced (item 6).
    independently verify `LocalPtyProvider`'s own declaration is honest, and
    any future provider claiming the same capability must clear the same
    gates before its declaration can be trusted.
+7. **§4.8/§11, new round 5:** the `DelegatedCutoverCoordinator`'s recovery
+   sweep's exact trigger/cadence is deliberately left unspecified —
+   correctness (never double-spawning, never inferring authority from
+   anything but a durable fact) does not depend on it, only liveness
+   (how promptly an orphan or an unconfirmed activation is noticed) does.
+   This is stated as an open, implementation-time decision, not concealed
+   as already resolved.
 
 ---
 

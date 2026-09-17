@@ -18,8 +18,20 @@ import type SyncDatabase from '../../sqlite/sync-database'
 // dispatch_termination, worktree_finalization, dispatch_lifecycle_incident,
 // dispatch_lifecycle_closure, dispatch_lifecycle_event) + their indexes. Zero
 // column added to any ORCA-S1/S2/S3 table.
+//
+// ORCA-S5 Delegated Cutover Core (SPEC §8.1/§8.2/§8.3): schema v5 → v6 — TWO
+// NEW TABLES (delegation_cutover, aicontrol_terminal_projection) + their
+// indexes, PLUS two additive, nullable ALTER TABLE columns on existing S4
+// tables (dispatch_process_binding.teardown_reason,
+// dispatch_lifecycle_closure.terminal_status_ref) — SPEC's own single v5→v6
+// ladder step ("ensure these two tables + these two columns exist"). This
+// session (Cutover Core) writes/reads only delegation_cutover; the two
+// nullable columns and aicontrol_terminal_projection ship as inert additive
+// schema per SPEC's bundled version bump, never consumed by any Cutover Core
+// production code (terminal projection/lifecycle remain out of this slice's
+// scope).
 
-export const EXECUTION_SCHEMA_VERSION = 5
+export const EXECUTION_SCHEMA_VERSION = 6
 
 const CREATE_SQL = `
 CREATE TABLE IF NOT EXISTS run_reservation (
@@ -286,6 +298,59 @@ CREATE TABLE IF NOT EXISTS dispatch_lifecycle_event (
 );
 `
 
+/**
+ * ORCA-S5 Delegated Cutover Core (SPEC §8.1/§8.3) — the sole authority-
+ * transfer fact (`delegation_cutover`) and the projection outbox
+ * (`aicontrol_terminal_projection`, inert until a later terminal-lifecycle
+ * slice writes to it). §8.2's two ALTER TABLE additions are applied
+ * separately (see `ensureDelegatedCutoverColumns`) because, unlike every
+ * table here, `ADD COLUMN` is not safely re-runnable via `IF NOT EXISTS`.
+ */
+export const DELEGATED_CUTOVER_SQL = `
+CREATE TABLE IF NOT EXISTS delegation_cutover (
+  correlation_id     TEXT PRIMARY KEY REFERENCES run_reservation(correlation_id),
+  orca_dispatch_id   TEXT NOT NULL REFERENCES dispatch_process_binding(orca_dispatch_id),
+  orca_run_id        TEXT NOT NULL,
+  aicontrol_run_id   TEXT NOT NULL,
+  fence_token        TEXT NOT NULL,
+  cutover_digest     TEXT NOT NULL,
+  cutover_at         TEXT NOT NULL,
+  ack_status         TEXT NOT NULL DEFAULT 'pending'
+);
+CREATE UNIQUE INDEX IF NOT EXISTS delegation_cutover_by_aicontrol_run
+  ON delegation_cutover(aicontrol_run_id);
+
+CREATE TABLE IF NOT EXISTS aicontrol_terminal_projection (
+  correlation_id          TEXT PRIMARY KEY REFERENCES dispatch_lifecycle_closure(correlation_id),
+  aicontrol_run_id        TEXT NOT NULL,
+  fence_token_ref         TEXT NOT NULL,
+  closure_digest_ref      TEXT NOT NULL,
+  attempt_count           INTEGER NOT NULL DEFAULT 0,
+  last_attempted_at       TEXT,
+  projected_at            TEXT,
+  status                  TEXT NOT NULL DEFAULT 'pending'
+);
+CREATE UNIQUE INDEX IF NOT EXISTS aicontrol_terminal_projection_by_run
+  ON aicontrol_terminal_projection(aicontrol_run_id);
+`
+
+function hasColumn(db: SyncDatabase, table: string, column: string): boolean {
+  const rows = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]
+  return rows.some((row) => row.name === column)
+}
+
+/** SPEC §8.2 — additive, nullable, backward-compatible. Guarded so a rerun
+ *  (fresh install already at v6, or a repeated migrate call) never re-issues
+ *  `ALTER TABLE ... ADD COLUMN` against a column that already exists. */
+function ensureDelegatedCutoverColumns(db: SyncDatabase): void {
+  if (!hasColumn(db, 'dispatch_process_binding', 'teardown_reason')) {
+    db.exec('ALTER TABLE dispatch_process_binding ADD COLUMN teardown_reason TEXT')
+  }
+  if (!hasColumn(db, 'dispatch_lifecycle_closure', 'terminal_status_ref')) {
+    db.exec('ALTER TABLE dispatch_lifecycle_closure ADD COLUMN terminal_status_ref TEXT')
+  }
+}
+
 function readSchemaVersion(db: SyncDatabase): number | undefined {
   const row = db.prepare("SELECT value FROM execution_meta WHERE key = 'schema_version'").get() as
     | { value: string }
@@ -311,6 +376,8 @@ export function migrateExecutionStore(db: SyncDatabase): void {
     db.exec(DISPATCH_WORKTREE_SQL)
     db.exec(WORKTREE_PROVENANCE_PROJECTION_SQL)
     db.exec(DELEGATION_BOUNDARY_LIFECYCLE_SQL)
+    db.exec(DELEGATED_CUTOVER_SQL)
+    ensureDelegatedCutoverColumns(db)
     const current = readSchemaVersion(db)
     if (current === undefined) {
       db.prepare("INSERT INTO execution_meta (key, value) VALUES ('schema_version', ?)").run(
@@ -320,6 +387,10 @@ export function migrateExecutionStore(db: SyncDatabase): void {
       // The v2->v3, v3->v4, and v4->v5 steps are all only "ensure the new
       // tables + indexes exist" — done by the CREATE statements above, because
       // none of S2/S3/S4 adds a column and therefore none needs an ALTER TABLE.
+      // v5->v6 (ORCA-S5) additionally needs the two guarded ALTER TABLE calls
+      // above (`ensureDelegatedCutoverColumns`), already applied unconditionally
+      // before this branch so a fresh v6 install and an upgraded one converge
+      // on the identical structure.
       db.prepare("UPDATE execution_meta SET value = ? WHERE key = 'schema_version'").run(
         String(EXECUTION_SCHEMA_VERSION)
       )

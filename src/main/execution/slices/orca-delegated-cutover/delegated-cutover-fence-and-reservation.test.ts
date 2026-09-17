@@ -16,7 +16,6 @@
 // Do not implement `establishDelegatedCutoverReservation` to make this pass.
 
 import { describe, expect, it } from 'vitest'
-// @ts-expect-error -- genuine RED: this application-layer step does not exist yet.
 import { establishDelegatedCutoverReservation } from '../../application/delegated-cutover-reservation-step'
 import {
   DELEGATED_CUTOVER_CORE_SLICE_REF,

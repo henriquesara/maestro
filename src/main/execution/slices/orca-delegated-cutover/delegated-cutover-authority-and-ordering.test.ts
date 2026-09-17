@@ -13,7 +13,6 @@
 // Do not implement `commitDelegatedCutover` to make this pass.
 
 import { describe, expect, it } from 'vitest'
-// @ts-expect-error -- genuine RED: this application-layer step does not exist yet.
 import { commitDelegatedCutover } from '../../application/delegated-cutover-commit-step'
 import {
   fixtureDispatchWorktree,
@@ -77,12 +76,13 @@ describe('ORCA-S5 Delegated Cutover Core -- authority transfer, ordering, failur
     const { tmp, exec, deps, input } = setup('corr_ord_1')
     const failingInput = {
       ...input,
-      // @ts-expect-error -- deliberately invalid pid to force mid-transaction failure.
+      // Deliberately invalid pid to force mid-transaction failure.
       processIdentity: { ...input.processIdentity, pid: null }
     }
 
     let outcome: { outcome: string } | undefined
     try {
+      // @ts-expect-error -- failingInput.processIdentity.pid is deliberately invalid (null, not number).
       outcome = await commitDelegatedCutover(deps, failingInput)
     } catch {
       outcome = undefined
@@ -123,12 +123,13 @@ describe('ORCA-S5 Delegated Cutover Core -- authority transfer, ordering, failur
     const { tmp, exec, deps, input } = setup('corr_fail_1')
     const failingInput = {
       ...input,
-      // @ts-expect-error -- deliberately invalid to force failure.
+      // Deliberately invalid to force failure.
       processIdentity: { ...input.processIdentity, pid: null }
     }
 
     let thrown: unknown
     try {
+      // @ts-expect-error -- failingInput.processIdentity.pid is deliberately invalid (null, not number).
       await commitDelegatedCutover(deps, failingInput)
     } catch (error) {
       thrown = error

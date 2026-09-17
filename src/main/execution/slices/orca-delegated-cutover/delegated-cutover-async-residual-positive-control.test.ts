@@ -10,6 +10,7 @@
 
 import { describe, expect, it, vi } from 'vitest'
 import { createAsyncSpawnCommitReporter } from '../../../../shared/async-spawn-commit-reporter'
+import type { DelegationCutoverCommitResult } from '../../../../shared/delegation-cutover-commit-result'
 
 describe('ORCA-S5 Delegated Cutover Core -- async-late self-dependency stays unreachable (§34)', () => {
   it('a coordinator-shaped caller of the real async guard never wraps or re-enters its own reporter', async () => {
@@ -19,7 +20,10 @@ describe('ORCA-S5 Delegated Cutover Core -- async-late self-dependency stays unr
     // reporter. This is the same shape gates 44-48 already exercise for the
     // published guard -- confirmed here once more against the delegated
     // shape specifically, per this mission's residual-compatibility check.
-    const commit = vi.fn(async () => ({ outcome: 'COMMITTED', correlationId: 'corr_1' }))
+    const commit = vi.fn(async (): Promise<DelegationCutoverCommitResult> => ({
+      outcome: 'COMMITTED',
+      correlationId: 'corr_1'
+    }))
     const reporter = createAsyncSpawnCommitReporter(async () => {
       const result = await commit()
       return result

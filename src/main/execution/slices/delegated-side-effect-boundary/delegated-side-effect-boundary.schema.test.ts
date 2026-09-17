@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import SyncDatabase from '../../../sqlite/sync-database'
-import { EXECUTION_SCHEMA_VERSION, migrateExecutionStore } from '../../infrastructure/execution-schema'
+import {
+  EXECUTION_SCHEMA_VERSION,
+  migrateExecutionStore
+} from '../../infrastructure/execution-schema'
 
 // ORCA-S4 SPEC §8 (schema v4 -> v5), gate 2 "no column added to any ORCA-S1/S2/S3
 // table". RED, and genuinely so against the REAL execution-schema.ts (no import
@@ -23,15 +26,15 @@ function tableColumns(db: SyncDatabase, table: string): string[] {
 
 function tableExists(db: SyncDatabase, table: string): boolean {
   return (
-    (db
-      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = ?")
-      .get(table) as { name: string } | undefined) !== undefined
+    (db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = ?").get(table) as
+      | { name: string }
+      | undefined) !== undefined
   )
 }
 
 describe('ORCA-S4 schema v4 -> v5 (§8)', () => {
-  it('EXECUTION_SCHEMA_VERSION must be bumped to 5', () => {
-    expect(EXECUTION_SCHEMA_VERSION).toBe(5)
+  it('EXECUTION_SCHEMA_VERSION is at least 5 (ORCA-S4 baseline; ORCA-S5 bumped it further, see delegated-cutover-transaction-and-schema.test.ts)', () => {
+    expect(EXECUTION_SCHEMA_VERSION).toBeGreaterThanOrEqual(5)
   })
 
   it('a fresh store migrated to current version has all six S4 tables', () => {
@@ -43,7 +46,7 @@ describe('ORCA-S4 schema v4 -> v5 (§8)', () => {
     db.close()
   })
 
-  it('dispatch_process_binding has the exact §8.1 column set', () => {
+  it("dispatch_process_binding has the exact §8.1 column set (plus ORCA-S5 §8.2's additive teardown_reason)", () => {
     const db = new SyncDatabase(':memory:')
     migrateExecutionStore(db)
     expect(tableColumns(db, 'dispatch_process_binding').sort()).toEqual(
@@ -57,7 +60,8 @@ describe('ORCA-S4 schema v4 -> v5 (§8)', () => {
         'os_start_marker',
         'os_start_marker_source',
         'spawned_at',
-        'teardown_requested_at'
+        'teardown_requested_at',
+        'teardown_reason'
       ].sort()
     )
     db.close()
@@ -118,7 +122,11 @@ describe('ORCA-S4 schema v4 -> v5 (§8)', () => {
       ].sort()
     )
     const indexes = (
-      db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='dispatch_lifecycle_incident'").all() as {
+      db
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='dispatch_lifecycle_incident'"
+        )
+        .all() as {
         name: string
       }[]
     ).map((r) => r.name)
@@ -126,7 +134,7 @@ describe('ORCA-S4 schema v4 -> v5 (§8)', () => {
     db.close()
   })
 
-  it('dispatch_lifecycle_closure has the exact §8.5 column set (including the ONE permitted post-insert mutation column)', () => {
+  it("dispatch_lifecycle_closure has the exact §8.5 column set (including the ONE permitted post-insert mutation column, plus ORCA-S5 §8.2's additive terminal_status_ref)", () => {
     const db = new SyncDatabase(':memory:')
     migrateExecutionStore(db)
     expect(tableColumns(db, 'dispatch_lifecycle_closure').sort()).toEqual(
@@ -141,7 +149,8 @@ describe('ORCA-S4 schema v4 -> v5 (§8)', () => {
         'finalization_status_ref',
         'closure_digest',
         'closed_at',
-        'post_closure_settlement_conflict_detected_at'
+        'post_closure_settlement_conflict_detected_at',
+        'terminal_status_ref'
       ].sort()
     )
     db.close()
@@ -153,7 +162,12 @@ describe('ORCA-S4 schema v4 -> v5 (§8)', () => {
     expect(tableColumns(db, 'dispatch_lifecycle_event').sort()).toEqual(
       ['correlation_id', 'event_kind', 'closure_digest_ref', 'emitted_at'].sort()
     )
-    const pk = (db.prepare('PRAGMA table_info(dispatch_lifecycle_event)').all() as { name: string; pk: number }[])
+    const pk = (
+      db.prepare('PRAGMA table_info(dispatch_lifecycle_event)').all() as {
+        name: string
+        pk: number
+      }[]
+    )
       .filter((c) => c.pk > 0)
       .map((c) => c.name)
     expect(pk.sort()).toEqual(['correlation_id', 'event_kind'].sort())
@@ -178,24 +192,32 @@ describe('ORCA-S4 schema v4 -> v5 (§8)', () => {
     migrateExecutionStore(after)
     expect(tableColumns(after, 'run_binding').sort()).toEqual(beforeCols.run_binding)
     expect(tableColumns(after, 'run_reservation').sort()).toEqual(beforeCols.run_reservation)
-    expect(tableColumns(after, 'settlement_observation').sort()).toEqual(beforeCols.settlement_observation)
-    expect(tableColumns(after, 'worktree_provenance').sort()).toEqual(beforeCols.worktree_provenance)
+    expect(tableColumns(after, 'settlement_observation').sort()).toEqual(
+      beforeCols.settlement_observation
+    )
+    expect(tableColumns(after, 'worktree_provenance').sort()).toEqual(
+      beforeCols.worktree_provenance
+    )
     expect(tableColumns(after, 'dispatch_worktree').sort()).toEqual(beforeCols.dispatch_worktree)
     after.close()
   })
 
-  it('an existing v4 store upgrades to v5 in place: prior rows survive, schema_version becomes 5', () => {
+  it('an existing store upgrades in place: prior rows survive, schema_version reaches EXECUTION_SCHEMA_VERSION', () => {
     const db = new SyncDatabase(':memory:')
     migrateExecutionStore(db) // opens at whatever EXECUTION_SCHEMA_VERSION currently is
     db.exec(
       "INSERT INTO run_reservation (correlation_id, slice_ref, workload_id, state, created_at, updated_at) VALUES ('corr_1','ORCA-S4','wl_1','reserved','t','t')"
     )
     migrateExecutionStore(db) // idempotent re-run, as every prior slice's ladder step is
-    const version = (db.prepare("SELECT value FROM execution_meta WHERE key='schema_version'").get() as {
-      value: string
-    }).value
-    expect(Number(version)).toBe(5)
-    const row = db.prepare("SELECT correlation_id FROM run_reservation WHERE correlation_id='corr_1'").get()
+    const version = (
+      db.prepare("SELECT value FROM execution_meta WHERE key='schema_version'").get() as {
+        value: string
+      }
+    ).value
+    expect(Number(version)).toBe(EXECUTION_SCHEMA_VERSION)
+    const row = db
+      .prepare("SELECT correlation_id FROM run_reservation WHERE correlation_id='corr_1'")
+      .get()
     expect(row).toBeDefined()
     db.close()
   })

@@ -132,6 +132,18 @@ export type RuntimeCreateAgentSessionRequest = {
   presentation?: RuntimeTerminalPresentation
   placement?: { tabId?: string; leafId?: string }
   viewMode?: 'terminal' | 'chat'
+  /**
+   * ORCA-S5 SPEC §4.8.3 (corrected round 5) — additive, optional, absent for
+   * every existing non-delegated caller. Minimum aiControl identity the
+   * coordinator needs; must never propagate into `PtySpawnOptions` or any
+   * generic provider/PTY contract (see `pty-provider-contract.ts`'s
+   * `PtySpawnOptions` — unmodified by this addition).
+   */
+  delegatedCutover?: {
+    aicontrolRunId: string
+    /** Caller-generated, per SPEC §6 Phase 1 — never minted by aiControl. */
+    fenceToken: string
+  }
 }
 
 export type RuntimeCreateAgentSessionResult = {

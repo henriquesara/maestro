@@ -226,7 +226,8 @@ describe('ORCA-S5 Delegated Cutover Core -- real site #5 production composition 
         rows: 24,
         cwd: '/tmp/worktree-1',
         command: opts?.command ?? 'echo hi',
-        onPtySpawnCommitted: opts?.onPtySpawnCommitted
+        onPtySpawnCommitted: opts?.onPtySpawnCommitted,
+        preparedDelegatedProcessIdentityCapture: opts?.preparedDelegatedProcessIdentityCapture
       } as never)
       return {
         handle: opts?.preAllocatedHandle ?? 'term_stub',
@@ -293,12 +294,23 @@ describe('ORCA-S5 Delegated Cutover Core -- real site #5 production composition 
   // §5 -- coordinator rejection holds the workload: onPtySpawnCommitted
   // rejects, spawnLocalPty's own real deferred-delivery await propagates it
   // out of `activateLocalPtySession`, so createAgentSession itself rejects.
+  //
+  // Test-authoring note (mission §3/§29): the first version of this test
+  // left the fence unseeded eligible, expecting the rejection to surface at
+  // the commit step -- but wiring the real S1->S2 reservation step (this
+  // GREEN session, ahead of the S5.4 commit call) now correctly fails
+  // closed EARLIER, at `establishReservation`, before any process is ever
+  // prepared -- exactly the frozen ordering (eligibility -> fence ->
+  // reservation -> prepare) mission §11 requires. commitDelegatedCutover is
+  // therefore never reached in that scenario, which is the CORRECT
+  // behavior, not a test bug in the old sense -- but it means this specific
+  // test must seed the fence eligible (so reservation succeeds and a real
+  // process IS prepared) and reject at the commit step itself instead, to
+  // exercise the intended boundary (§5/§6 of this mission).
   it('a coordinator rejection through the real path holds the workload (createAgentSession rejects)', async () => {
     const runtime = newRuntime()
     const fence = new FakeAiControlFenceClient()
-    // Deliberately NOT seeded eligible -- the real fence CAS rejects, so the
-    // real reservation step (once wired) never establishes authority and
-    // the coordinator's commit must fail closed.
+    fence.seedEligible('aicontrol_run_site5_1')
     runtime.getDelegatedCutoverCoordinatorDeps = () => ({ fence })
     const coordinator = runtime.getDelegatedCutoverCoordinator()
     const commitSpy = vi
@@ -307,5 +319,19 @@ describe('ORCA-S5 Delegated Cutover Core -- real site #5 production composition 
 
     await expect(runtime.createAgentSession(delegatedRequest(operationId()))).rejects.toThrow()
     expect(commitSpy).toHaveBeenCalledTimes(1)
+  })
+
+  // §5 companion -- the ordering claim itself: an ineligible/rejected fence
+  // never even reaches the commit step, proving fail-closed-before-prepare.
+  it('a fence rejection through the real path never reaches commitDelegatedCutover', async () => {
+    const runtime = newRuntime()
+    const fence = new FakeAiControlFenceClient()
+    // Deliberately NOT seeded eligible.
+    runtime.getDelegatedCutoverCoordinatorDeps = () => ({ fence })
+    const coordinator = runtime.getDelegatedCutoverCoordinator()
+    const commitSpy = vi.spyOn(coordinator, 'commitDelegatedCutover')
+
+    await expect(runtime.createAgentSession(delegatedRequest(operationId()))).rejects.toThrow()
+    expect(commitSpy).not.toHaveBeenCalled()
   })
 })

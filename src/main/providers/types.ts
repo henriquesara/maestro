@@ -6,6 +6,7 @@
 
 export type {
   IPtyProvider,
+  PreparedDelegatedProcessIdentityCapture,
   PtyBackgroundStreamEvent,
   PtyDataEvent,
   PtyProcessInfo,

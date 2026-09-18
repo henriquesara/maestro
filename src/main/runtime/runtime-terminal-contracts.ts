@@ -19,6 +19,7 @@ import type { RuntimeTerminalWriteOptions } from './runtime-terminal-writer'
 import type { RuntimePtyController } from './runtime-pty-controller-contract'
 import type { RuntimeAgentRowSnapshot } from './runtime-worktree-agent-rows'
 import type { DelegationCutoverCommitResult } from '../../shared/delegation-cutover-commit-result'
+import type { PreparedDelegatedProcessIdentityCapture } from '../providers/types'
 import type { WorkerTerminalHostScope } from './orchestration/worker-terminal-process-liveness'
 
 export type TerminalCreateOptions = {
@@ -54,6 +55,9 @@ export type TerminalCreateOptions = {
   structuredAgentSessionId?: string
   signal?: AbortSignal
   onPtySpawnCommitted?: () => Promise<DelegationCutoverCommitResult> | void
+  /** SPEC.md §4.8.3/§4.8.6 (focused composition fix). Additive -- absent
+   *  for every existing caller. */
+  preparedDelegatedProcessIdentityCapture?: PreparedDelegatedProcessIdentityCapture
   deferMobileSessionPublish?: boolean
 }
 

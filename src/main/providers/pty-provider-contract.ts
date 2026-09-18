@@ -44,6 +44,17 @@ export type PtyProviderBufferSnapshot = {
   terminalOwner?: TerminalOwner
 }
 
+/** SPEC.md §4.8.3/§4.8.6 (focused composition fix) — a plain, writable box
+ *  the real local spawn-commit site (`local-pty-spawn.ts`) populates with
+ *  the just-spawned process's raw pid, immediately before invoking
+ *  `onPtySpawnCommitted`. Pure OS mechanism identity — never aiControl run
+ *  ID, fence token, or any Execution-domain object — so it may legally
+ *  cross this authority-neutral provider boundary (unlike those, which
+ *  must never propagate past `RuntimeCreateAgentSessionRequest`). The
+ *  provider never reads `.current` back; only the caller that supplied the
+ *  box does, after `onPtySpawnCommitted` returns. */
+export type PreparedDelegatedProcessIdentityCapture = { current?: { pid: number } }
+
 export type PtySpawnOptions = {
   cols: number
   rows: number
@@ -120,6 +131,9 @@ export type PtySpawnOptions = {
    *  by the future delegated call path; absent/false for every ordinary
    *  terminal or agent-session spawn today -- purely additive. */
   deferDelegatedCommandDelivery?: boolean
+  /** See `PreparedDelegatedProcessIdentityCapture` above. Absent for every
+   *  existing non-delegated caller — purely additive. */
+  preparedDelegatedProcessIdentityCapture?: PreparedDelegatedProcessIdentityCapture
 }
 
 export type { PtyProcessInfo, PtySpawnResult }

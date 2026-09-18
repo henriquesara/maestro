@@ -108,6 +108,13 @@ export async function spawnLocalPty(
   // therefore any workload delivery -- until the durable commit settles; a
   // rejection here propagates out of spawnLocalPty and
   // activateLocalPtySession is never reached.
+  if (args.preparedDelegatedProcessIdentityCapture) {
+    // Why here, before the callback: this is the exact real site (SPEC.md
+    // §4.8.6/Gate 31) the stable production process identity first exists
+    // at -- `spawnResult.process.pid`. Pure mechanism data; this provider
+    // never learns why a caller wants it.
+    args.preparedDelegatedProcessIdentityCapture.current = { pid: spawnResult.process.pid }
+  }
   if (args.onPtySpawnCommitted) {
     await args.onPtySpawnCommitted()
   }

@@ -9,7 +9,12 @@ import type { WorktreeStartupLaunch } from '../../shared/worktree/launch-types'
 import type { PtyIncarnationId } from '../../shared/pty-incarnation'
 import type { PtyBindingSourceExpectation } from '../persistence'
 import type { ExecutionHostId } from '../../shared/execution-host'
-import type { PtyProviderBufferSnapshot, PtyProcessInfo, PtySpawnResult } from '../providers/types'
+import type {
+  PreparedDelegatedProcessIdentityCapture,
+  PtyProviderBufferSnapshot,
+  PtyProcessInfo,
+  PtySpawnResult
+} from '../providers/types'
 import type { PtyProcessInspection } from '../providers/pty-process-inspection'
 import type { WriteSettlement } from '../../shared/pty-write-settlement'
 import type { DelegationCutoverCommitResult } from '../../shared/delegation-cutover-commit-result'
@@ -70,6 +75,7 @@ export type RuntimePtyController = {
     agentSessionCreateOperationId?: string
     signal?: AbortSignal
     onPtySpawnCommitted?: () => Promise<DelegationCutoverCommitResult> | void
+    preparedDelegatedProcessIdentityCapture?: PreparedDelegatedProcessIdentityCapture
     adoptedStablePane?: {
       result: PtySpawnResult
       owner: {

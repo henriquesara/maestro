@@ -11,6 +11,7 @@ import {
   parseAgentSessionOperationTimestamp
 } from '../../shared/agent-session-host-authority'
 import { createHash } from 'node:crypto'
+import { buildDelegatedCutoverSpawnCommitCallback } from './orca-runtime-delegated-cutover-callback'
 import {
   AGENT_SESSION_OPERATION_GLOBAL_LIMIT,
   AGENT_SESSION_OPERATION_PER_CLIENT_LIMIT
@@ -207,6 +208,37 @@ export class OrcaRuntimeWithCreateAgentSession extends OrcaRuntimeWithGetAgentSe
         connectionId: workspace.connectionId ?? null,
         terminalHandle: operationHandle
       }
+      // ORCA-S5 SPEC §4.8.3/§4.8.4 (focused composition fix): additive,
+      // absent for every existing non-delegated request. The capture box
+      // is populated by the real local spawn-commit site
+      // (local-pty-spawn.ts, before this closure fires) with the just-
+      // spawned process's raw pid — pure OS mechanism identity, never
+      // aiControl/fence data, so it may legally cross the provider
+      // boundary. This closure, not the provider, resolves the rest of the
+      // real, stable process identity (osStartMarker/osStartMarkerSource,
+      // via the same `captureOsStartMarkerSync` primitive ORCA-S4 already
+      // uses) once the box is populated.
+      const delegatedCutover = request.delegatedCutover
+      const preparedProcessIdentityCapture = delegatedCutover ? {} : undefined
+      if (delegatedCutover) {
+        // ORCA-S5 SPEC §5.2 S1->S2: eligibility -> fence -> run_reservation,
+        // strictly before any process is prepared (this call is the ONLY
+        // production caller of `establishReservation` -- its own semantics,
+        // ordering, and idempotency are unmodified by this session). Local-
+        // only per this slice's frozen scope (gate 53): `isRemote` is the
+        // real, already-computed signal this same function derives from
+        // `workspace.connectionId` above; the authoritative capability gate
+        // (`supportsDelegatedCutoverHold`) still independently enforces
+        // this downstream, in `buildRuntimePtySpawnOptions`, unchanged.
+        await this.getDelegatedCutoverCoordinator().establishReservation({
+          correlationId: executionOperationId,
+          aicontrolRunId: delegatedCutover.aicontrolRunId,
+          fenceToken: delegatedCutover.fenceToken,
+          workloadId: operationHandle,
+          providerEligible: !isRemote,
+          now: new Date().toISOString()
+        })
+      }
       try {
         terminal = await this.createTerminal(`id:${workspace.id}`, {
           command: startup.launchCommand,
@@ -222,9 +254,27 @@ export class OrcaRuntimeWithCreateAgentSession extends OrcaRuntimeWithGetAgentSe
           viewMode: request.viewMode,
           agentSessionCreateOperationId: executionOperationId,
           signal: caller.signal,
-          onPtySpawnCommitted: () => {
-            retainReplayFence = true
-          }
+          ...(delegatedCutover
+            ? {
+                deferDelegatedCommandDelivery: true,
+                preparedDelegatedProcessIdentityCapture: preparedProcessIdentityCapture
+              }
+            : {}),
+          onPtySpawnCommitted: delegatedCutover
+            ? buildDelegatedCutoverSpawnCommitCallback({
+                getCoordinator: () => this.getDelegatedCutoverCoordinator(),
+                aicontrolRunId: delegatedCutover.aicontrolRunId,
+                fenceToken: delegatedCutover.fenceToken,
+                correlationId: executionOperationId,
+                orcaDispatchId: operationHandle,
+                preparedProcessIdentityCapture,
+                onCommitSucceeded: () => {
+                  retainReplayFence = true
+                }
+              })
+            : () => {
+                retainReplayFence = true
+              }
         })
       } catch (error) {
         if (isAgentSessionOperationOutcomeUnknown(error)) {

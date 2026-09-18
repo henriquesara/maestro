@@ -188,6 +188,10 @@ export async function buildRuntimePtySpawnOptions(
     // Why: local fallback has no lower operation ledger, so commit must be reported at native spawn.
     ctx.spawnOptions.onPtySpawnCommitted = ctx.reportPtySpawnCommitted
   }
+  if (args.preparedDelegatedProcessIdentityCapture) {
+    ctx.spawnOptions.preparedDelegatedProcessIdentityCapture =
+      args.preparedDelegatedProcessIdentityCapture
+  }
 
   const resolvedPaneSpawnReservationKey = makePaneSpawnReservationKey(
     args.worktreeId,

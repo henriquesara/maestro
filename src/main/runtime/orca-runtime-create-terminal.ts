@@ -123,6 +123,12 @@ export class OrcaRuntimeWithCreateTerminal extends OrcaRuntimeWithTerminalCreate
           throw new Error('client_disconnected')
         }
         let result: Awaited<ReturnType<NonNullable<dependencies.RuntimePtyController['spawn']>>>
+        const agentSessionEnsureField = launchOpts.agentSessionClaim && {
+          agentSessionEnsure: {
+            claim: launchOpts.agentSessionClaim,
+            surface: { worktreeId: workspace.id, tabId, leafId, terminalHandle: preAllocatedHandle }
+          }
+        }
         try {
           result = await this.ptyController.spawn({
             cols: 120,
@@ -147,19 +153,7 @@ export class OrcaRuntimeWithCreateTerminal extends OrcaRuntimeWithTerminalCreate
             tabId,
             leafId,
             ...(terminalColorQueryReplies ? { terminalColorQueryReplies } : {}),
-            ...(launchOpts.agentSessionClaim
-              ? {
-                  agentSessionEnsure: {
-                    claim: launchOpts.agentSessionClaim,
-                    surface: {
-                      worktreeId: workspace.id,
-                      tabId,
-                      leafId,
-                      terminalHandle: preAllocatedHandle
-                    }
-                  }
-                }
-              : {}),
+            ...agentSessionEnsureField,
             ...(launchOpts.agentSessionCreateOperationId
               ? { agentSessionCreateOperationId: launchOpts.agentSessionCreateOperationId }
               : {}),

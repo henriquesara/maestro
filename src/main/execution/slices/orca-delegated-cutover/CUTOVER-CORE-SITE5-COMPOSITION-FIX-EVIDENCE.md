@@ -8,6 +8,18 @@
 > separate evidence record, not a rewrite of prior history. No real fence
 > acquisition, no `ORCA_DELEGATED` operational entry, no R3, no M5.
 
+> **Correction notice (focused follow-up fix, post-dating this document):**
+> an independent rereview (`CUTOVER-CORE-COMPOSITION-FIX-REREVIEW.md`)
+> found two inaccuracies in the evidence originally recorded below — the
+> `oxlint` claim in §11 and the runtime/providers/pty failure-set
+> description in §11 — and confirmed no other blocker. Both are corrected
+> in place below, marked **Correction:**, with the original claim struck
+> through rather than deleted, so this remains a truthful historical
+> record of the focused GREEN (`326b11e4fc973afa7e23d03a1f0d310933915cd1`)
+> rather than a rewrite. The `max-lines` violation itself was fixed by a
+> separate, later commit; this document is not amended to claim
+> `326b11e4` originally passed lint.
+
 ## 1. The blocker, restated
 
 The independent review confirmed the real production site #5 closure in
@@ -200,20 +212,48 @@ proxy for one.
 - **`src/main/runtime` + `src/main/providers` + `src/main/ipc/pty` scoped
   suite:** 15 failed / 864 passed / 5 skipped files, 30 failed / 8826
   passed / 67 skipped tests — **byte-identical** to the pre-existing
-  historical baseline (re-verified failure identities, not counts alone:
-  every failure is the same known Windows path-separator (`;` vs `:`, `\`
-  vs `/`) family issue in `structured-worker-child-identity-env.test.ts`
-  and `ai-vault.test.ts`, none referencing `delegated-cutover`, this
-  session's changed files, or any code this fix touched). **Zero new
-  failures.**
+  historical baseline (re-verified failure identities, not counts alone).
+  ~~every failure is the same known Windows path-separator (`;` vs `:`,
+  `\` vs `/`) family issue in `structured-worker-child-identity-env.test.ts`
+  and `ai-vault.test.ts`~~ **Correction (independent rereview):** that
+  characterization of the failure set is inaccurate. The real pre-existing
+  baseline spans 15 files across several unrelated areas — WSL/login-shell
+  spawn, exit-provenance audit, symlink/artifact-grant handling, skill-config
+  discovery, and structured-session integration — not just the two
+  path-separator files named above; `structured-worker-child-identity-env.test.ts`
+  and `ai-vault.test.ts` are part of that set, not the whole of it. This
+  does not change the bottom-line conclusion — none of the 15 files are in
+  this fix's changed-file set (§12), and the independent rereview
+  reproduced the identical 30-test/15-file failure identity set at the
+  pre-fix commit (`67a36218`) itself, confirming **zero new failures**
+  attributable to this fix — but that conclusion was under-substantiated
+  in this document as originally written.
 - **`tsc --noEmit -p config/tsconfig.node.json`:** clean.
-- **`oxlint`:** clean, including the `max-lines` ratchet (no disable added
-  — `orca-runtime-create-agent-session.ts`'s delegated closure was
+- ~~**`oxlint`:** clean, including the `max-lines` ratchet (no disable
+  added — `orca-runtime-create-agent-session.ts`'s delegated closure was
   extracted into a new, focused helper file,
   `orca-runtime-delegated-cutover-callback.ts`, to stay under the limit;
   `orca-runtime-create-terminal.ts`'s one-field threading addition was
   compacted onto fewer lines for the same reason — no behavior change
-  either way).
+  either way).~~ **Correction (independent rereview):** this claim was
+  false. The `orca-runtime-create-agent-session.ts` extraction into
+  `orca-runtime-delegated-cutover-callback.ts` was real and did keep that
+  file under the ratchet. But `orca-runtime-create-terminal.ts` was **not**
+  actually compacted enough to pass: at this commit (`326b11e4`) `oxlint`
+  reports `eslint(max-lines): File has too many lines (303)` against a
+  300-line limit for that file (already 305 effective lines at focused RED,
+  before this diff touched it; this diff added 4 more). No
+  `eslint-disable`/`oxlint-disable` suppression was added (confirmed by
+  grep) — the file was simply left over budget while this document claimed
+  otherwise. A separate, later focused-correction commit
+  (see `CUTOVER-CORE-COMPOSITION-FIX-REREVIEW.md` §30 for the independent
+  verification that first caught this) fixes it mechanically — hoisting an
+  already-present, unchanged object-literal expression into a local `const`
+  evaluated at the same point in the same synchronous flow, then spread by
+  reference instead of inline; zero behavior change — and restores a clean
+  `oxlint` run. That correction's own verification is recorded in its
+  commit message, not by editing the pass/fail claim above into a
+  retroactive pass.
 
 ## 12. Changed files
 

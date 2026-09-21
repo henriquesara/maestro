@@ -10,6 +10,9 @@ export type OsStartMarkerSource =
 
 export type ProcessTreeKillScope = 'posix-process-group' | 'win-taskkill-tree'
 
+/** ORCA-S5 SPEC §8.2/§9.1 — the durable cause of a teardown, captured in the SAME statement as `teardown_requested_at`. */
+export type TeardownReason = 'user_cancel' | 'timeout'
+
 export type DispatchProcessBindingRecord = {
   orcaDispatchId: string
   correlationId: string
@@ -25,6 +28,8 @@ export type DispatchProcessBindingRecord = {
   spawnedAt: string
   /** The ONE permitted post-insert mutation — set durably BEFORE signalProcessTree (§9.3, window L6). */
   teardownRequestedAt: string | null
+  /** ORCA-S5 §8.2 — NULL for every ORCA-S4 shadow row; written only with a teardown request for a delegated run. Present on a read-back only when set. */
+  teardownReason?: TeardownReason | null
 }
 
 /** The process identity sidecar (§9.2 steps 3/4) — written before the transaction opens. */

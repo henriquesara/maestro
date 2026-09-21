@@ -9,6 +9,10 @@ export type DispatchLifecycleIncidentKind =
   | 'worktree_finalization_conflict'
   | 'orphan_worktree_unverifiable'
   | 'post_closure_settlement_conflict'
+  /** ORCA-S5 SPEC §9.2 — a terminal delegated process whose durable facts cannot legally classify one of completed/failed/cancelled/timeout. */
+  | 'unclassifiable_terminal_status'
+  /** ORCA-S5 SPEC §10.2/§14 X7 — the aiControl projection outcome cannot be treated as agreement (ALREADY_TERMINAL is unverifiable; fence mismatch; divergent). */
+  | 'terminal_projection_blocked'
 
 export type DispatchLifecycleIncidentRecord = {
   id: string

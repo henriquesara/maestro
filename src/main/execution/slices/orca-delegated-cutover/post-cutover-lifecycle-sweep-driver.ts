@@ -41,7 +41,7 @@ export type SweepOptions = {
 
 /**
  * Builds the sweep's dependency record over the fixture's CURRENT stores.
- * `delegationCutovers` / `projectionWriter` are the two RED-imposed optional
+ * `delegationCutovers` / `projections` / `projectionWriter` are the optional
  * deps (SPEC §8.1 delegated discrimination; SPEC §10 outbox delivery) — today's
  * sweep simply ignores them, which is itself part of the RED.
  */
@@ -72,6 +72,7 @@ export function lifecycleDeps(
     now: fx.clock,
     newId: (prefix: string) => `${prefix}_pc_${++idn}`,
     delegationCutovers: s.delegationCutovers,
+    projections: s.projections,
     projectionWriter: opts.projectionWriter,
     ...opts.overrideStores
   } as unknown as DelegationBoundaryLifecycleDeps
@@ -275,7 +276,7 @@ export function stripVolatile(rows: unknown[]): unknown[] {
   return rows.map((r) => {
     const copy = { ...(r as Record<string, unknown>) }
     for (const k of Object.keys(copy)) {
-      if (/(_at|^id$|raised_at|last_attempted_at|attempt_count)$/.test(k)) {
+      if (/(_at|^id$|raised_at|last_attempted_at|attempt_count|path|path_ref)$/.test(k)) {
         delete copy[k]
       }
     }

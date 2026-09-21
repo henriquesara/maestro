@@ -22,10 +22,12 @@ type Row = {
   closure_digest: string
   closed_at: string
   post_closure_settlement_conflict_detected_at: string | null
+  /** ORCA-S5 §8.2 — additive column (schema v6). */
+  terminal_status_ref?: string | null
 }
 
 function toRecord(row: Row): DispatchLifecycleClosureRecord {
-  return {
+  const record: DispatchLifecycleClosureRecord = {
     correlationId: row.correlation_id,
     orcaDispatchId: row.orca_dispatch_id,
     orcaRunId: row.orca_run_id,
@@ -38,6 +40,11 @@ function toRecord(row: Row): DispatchLifecycleClosureRecord {
     closedAt: row.closed_at,
     postClosureSettlementConflictDetectedAt: row.post_closure_settlement_conflict_detected_at
   }
+  // Keyed only when non-NULL, so every ORCA-S4 shadow closure keeps its exact shape.
+  if (row.terminal_status_ref) {
+    record.terminalStatusRef = row.terminal_status_ref
+  }
+  return record
 }
 
 export class SqliteDispatchLifecycleClosureStore {
@@ -49,13 +56,19 @@ export class SqliteDispatchLifecycleClosureStore {
 
   insert(record: DispatchLifecycleClosureRecord): void {
     this.ensureSchema()
+    // ORCA-S5 §9.2 — a delegated closure carrying a non-NULL classification is ONE atomic
+    // INSERT that includes `terminal_status_ref` (its digest covers that value, so the row and
+    // its digest can never be observed apart). `undefined`/`null` keeps the ORCA-S4 statement.
+    const withStatus = typeof record.terminalStatusRef === 'string'
     this.db
       .prepare(
         `INSERT INTO dispatch_lifecycle_closure (
            correlation_id, orca_dispatch_id, orca_run_id, slice_ref,
            settlement_status_ref, worktree_provenance_ref, termination_method_ref,
-           finalization_status_ref, closure_digest, closed_at, post_closure_settlement_conflict_detected_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+           finalization_status_ref, closure_digest, closed_at, post_closure_settlement_conflict_detected_at${
+             withStatus ? ', terminal_status_ref' : ''
+           }
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?${withStatus ? ', ?' : ''})`
       )
       .run(
         record.correlationId,
@@ -68,7 +81,8 @@ export class SqliteDispatchLifecycleClosureStore {
         record.finalizationStatusRef,
         record.closureDigest,
         record.closedAt,
-        record.postClosureSettlementConflictDetectedAt
+        record.postClosureSettlementConflictDetectedAt,
+        ...(withStatus ? [record.terminalStatusRef as string] : [])
       )
   }
 

@@ -19,8 +19,16 @@ import {
   commitDelegatedCutover,
   type DelegatedCutoverCommitInput
 } from '../execution/application/delegated-cutover-commit-step'
+import type { AiControlDelegationProjectionPort } from '../execution/application/converge-delegated-lifecycle-steps'
+import type { DelegationBoundaryLifecycleReport } from '../execution/application/delegation-boundary-lifecycle-contract'
 import type { DelegationCutoverCommitResult } from '../../shared/delegation-cutover-commit-result'
+import {
+  createDelegatedLifecycleReconciler,
+  type DelegatedLifecycleReconcilerDeps,
+  type DelegatedTeardownRequest
+} from './orca-runtime-delegated-lifecycle-composition'
 import { OrcaRuntimeWithDeliverPendingMessages } from './orca-runtime-deliver-pending-messages'
+import { RealDelegatedProcessPort } from './orca-runtime-real-delegated-process-port'
 
 // ORCA-S5 Delegated Cutover Core — SPEC.md §4.8 (composition root, corrected
 // round 5, independently accepted at 627b00b0b7 / caf1526729 / b8fe7cb942).
@@ -50,6 +58,10 @@ export type DelegatedCutoverCoordinatorDeps = {
   fence?: AiControlFenceClientPort
   /** Distinct from the shadow-observation slice's own `slice_ref`. */
   sliceRef?: string
+  /** SPEC §7.1 — the mechanism port for the post-cutover sweep. Defaults to the real one; tests inject an OS-edge fake. */
+  processPort?: DelegatedLifecycleReconcilerDeps['processPort']
+  /** SPEC §10 — the aiControl transport. Absent by default: no network transport exists, so outbox rows stay `pending`. */
+  projectionWriter?: AiControlDelegationProjectionPort
 }
 
 export const DELEGATED_CUTOVER_CORE_SLICE_REF = 'ORCA-S5-DELEGATED-CUTOVER-CORE'
@@ -76,6 +88,16 @@ export type DelegatedCutoverCoordinator = {
   recoverPendingDelegatedCutovers(): Promise<
     { correlationId: string; authority: 'ORCA_DELEGATED' }[]
   >
+  /**
+   * ORCA-S5 post-cutover lifecycle (SPEC §4.8.1, §11): ONE reconciliation pass over every
+   * delegated run, derived from durable facts only. Cadence is not frozen — call it as often
+   * as liveness needs; correctness reaches the same fixed point regardless.
+   */
+  reconcileDelegatedLifecycles(): Promise<DelegationBoundaryLifecycleReport>
+  /** SPEC §12 — Orca-owned cancellation: durably records intent + `user_cancel` (first writer wins). Never signals itself. */
+  requestDelegatedCancellation(input: { correlationId: string }): Promise<DelegatedTeardownRequest>
+  /** SPEC §9.1 — records an already-DECIDED timeout cause. The SLA source/policy is unfrozen and not modelled. */
+  requestDelegatedTimeout(input: { correlationId: string }): Promise<DelegatedTeardownRequest>
 }
 
 export class OrcaRuntimeWithDelegatedCutoverCoordinator extends OrcaRuntimeWithDeliverPendingMessages {
@@ -104,6 +126,13 @@ export class OrcaRuntimeWithDelegatedCutoverCoordinator extends OrcaRuntimeWithD
       const dispatchWorktrees = new SqliteDispatchWorktreeStore(db)
       const processBindings = new SqliteDispatchProcessBindingStore(db)
       const delegationCutovers = new SqliteDelegationCutoverStore(db)
+      const lifecycle = createDelegatedLifecycleReconciler({
+        db,
+        sliceRef,
+        processPort: deps.processPort ?? new RealDelegatedProcessPort(),
+        projectionWriter: deps.projectionWriter,
+        userDataDir: getAppEnvironment().getPath('userData')
+      })
 
       this._delegatedCutoverCoordinator = {
         establishReservation: (input) =>
@@ -164,7 +193,13 @@ export class OrcaRuntimeWithDelegatedCutoverCoordinator extends OrcaRuntimeWithD
             correlationId: row.correlation_id,
             authority: 'ORCA_DELEGATED' as const
           }))
-        }
+        },
+
+        reconcileDelegatedLifecycles: () => lifecycle.reconcile(),
+        requestDelegatedCancellation: async ({ correlationId }) =>
+          lifecycle.requestTeardown({ correlationId, reason: 'user_cancel' }),
+        requestDelegatedTimeout: async ({ correlationId }) =>
+          lifecycle.requestTeardown({ correlationId, reason: 'timeout' })
       }
       void delegationCutovers // constructed for schema-ensure side effect; reads go through recoverPendingDelegatedCutovers's own query
     }

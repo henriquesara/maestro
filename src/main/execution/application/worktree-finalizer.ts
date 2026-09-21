@@ -20,6 +20,13 @@ export type WorktreeFinalizationInput = {
   eligibilityDigest: string
   /** null = a legacy/pre-S3 binding with no durable worktree at all. */
   worktreePath: string | null
+  /**
+   * ORCA-S5 SPEC §13/§17, X14, gate 24 — the binding is a REAL delegated dispatch worktree
+   * (a durable `delegation_cutover` exists). The S4 real-deletion arm NEVER fires for it: the
+   * decision is recorded as `skipped_not_eligible` and the filesystem is never touched, whether
+   * the path lies inside or outside the shadow root.
+   */
+  realDelegatedWorktree?: boolean
   now: () => string
 }
 
@@ -48,8 +55,9 @@ export async function advanceWorktreeFinalization(
       outcomeDetailJson: null,
       conflictedAt: null
     })
-    if (input.worktreePath === null) {
-      // Legacy binding — never had a durable worktree. No filesystem act.
+    if (input.worktreePath === null || input.realDelegatedWorktree) {
+      // Legacy binding (never had a durable worktree) or a real delegated worktree
+      // (§13). No filesystem act.
       deps.finalizations.markSkippedNotEligible(input.correlationId)
     }
     return
@@ -60,7 +68,7 @@ export async function advanceWorktreeFinalization(
     return
   }
 
-  if (input.worktreePath === null) {
+  if (input.worktreePath === null || input.realDelegatedWorktree) {
     deps.finalizations.markSkippedNotEligible(input.correlationId)
     return
   }

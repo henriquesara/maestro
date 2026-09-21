@@ -12,6 +12,7 @@ import SyncDatabase from '../../../sqlite/sync-database'
 import { commitDelegatedCutover } from '../../application/delegated-cutover-commit-step'
 import { establishDelegatedCutoverReservation } from '../../application/delegated-cutover-reservation-step'
 import { migrateExecutionStore } from '../../infrastructure/execution-schema'
+import { SqliteAiControlTerminalProjectionStore } from '../../infrastructure/sqlite-aicontrol-terminal-projection-store'
 import { SqliteDelegationCutoverStore } from '../../infrastructure/sqlite-delegation-cutover-store'
 import { SqliteDispatchLifecycleClosureStore } from '../../infrastructure/sqlite-dispatch-lifecycle-closure-store'
 import { SqliteDispatchLifecycleEventStore } from '../../infrastructure/sqlite-dispatch-lifecycle-event-store'
@@ -63,7 +64,8 @@ export function openLifecycleStores(dbPath: string) {
     closures: new SqliteDispatchLifecycleClosureStore(db),
     events: new SqliteDispatchLifecycleEventStore(db),
     incidents: new SqliteDispatchLifecycleIncidentStore(db),
-    delegationCutovers: new SqliteDelegationCutoverStore(db)
+    delegationCutovers: new SqliteDelegationCutoverStore(db),
+    projections: new SqliteAiControlTerminalProjectionStore(db)
   }
 }
 export type LifecycleStores = ReturnType<typeof openLifecycleStores>
@@ -132,7 +134,12 @@ export type DelegatedRun = {
 export async function commitDelegatedRun(
   fx: LifecycleFixture,
   n = 1,
-  over: { worktreeRoot?: string; osStartMarkerSource?: 'unavailable' } = {}
+  over: {
+    worktreeRoot?: string
+    osStartMarkerSource?: 'unavailable'
+    /** Bind a REAL OS process instead of a scripted fake pid (real-port integration tests). */
+    process?: Pick<DelegatedRun, 'pid' | 'osStartMarker' | 'osStartMarkerSource'>
+  } = {}
 ): Promise<DelegatedRun> {
   const win = process.platform === 'win32'
   const run: DelegatedRun = {
@@ -152,6 +159,9 @@ export async function commitDelegatedRun(
       `dispatch_pc_${n}`
     ),
     worktreeSentinel: `real worktree content ${n}`
+  }
+  if (over.process) {
+    Object.assign(run, over.process)
   }
   mkdirSync(run.worktreePath, { recursive: true })
   writeFileSync(join(run.worktreePath, 'sentinel.txt'), run.worktreeSentinel)

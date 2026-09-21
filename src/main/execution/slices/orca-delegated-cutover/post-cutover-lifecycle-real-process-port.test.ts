@@ -29,7 +29,7 @@
 // production port against the real OS. Nothing here models the desired
 // behavior in a fake.
 
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -122,6 +122,26 @@ function durableOf(pid: number, dir: string, over: Record<string, unknown> = {})
     ...over
   }
 }
+/**
+ * Durable identity EVIDENCE (the S4 sidecar shape) for the adopted process. No production
+ * writer exists for a real PTY-spawned process (an unresolved frozen-architecture seam, see
+ * POST-CUTOVER-LIFECYCLE-GREEN-EVIDENCE.md), and this slice deliberately does not invent one:
+ * the port USES such evidence when it exists and fails closed when it does not. The tests that
+ * assert the "evidence exists" branch supply it here; the "evidence absent" branch is asserted
+ * separately below.
+ */
+function writeIdentityEvidence(dir: string): void {
+  writeFileSync(
+    join(dir, 'dispatch_port_1.json'),
+    JSON.stringify({
+      correlationId: 'corr_port_1',
+      orcaRunId: 'run_port_1',
+      orcaDispatchId: 'dispatch_port_1',
+      processNonce: 'nonce_port_1'
+    })
+  )
+}
+
 function tmp(): string {
   const d = mkdtempSync(join(tmpdir(), 'orca-s5-realport-'))
   tmpDirs.push(d)
@@ -193,10 +213,65 @@ describe('RED — identity is the SAME incarnation or nothing: no PID-only contr
     const real = realLongLivedProcess()
     const port = new Port()
     port.spawn(adoptInput(real.pid as number, dir))
+    writeIdentityEvidence(dir)
 
     const observation = await port.observe(null, durableOf(real.pid as number, dir))
 
     expect.soft(observation.kind).toBe('still_running')
+  })
+
+  it('NO durable identity evidence for a live process: fail closed (identity_unverifiable) — never verified from pid + marker alone, never signalled', async () => {
+    const Port = await loadPort()
+    const dir = tmp()
+    const real = realLongLivedProcess()
+    const port = new Port()
+    port.spawn(adoptInput(real.pid as number, dir)) // adoption alone writes no evidence (unfrozen seam)
+
+    const observation = await port.observe(null, durableOf(real.pid as number, dir))
+
+    expect.soft(observation.kind).toBe('identity_unverifiable')
+    expect
+      .soft(real.exitCode === null && real.signalCode === null, 'observing never signals')
+      .toBe(true)
+  })
+
+  it('a macOS-style durable identity (`posix_ps_lstart`) cannot be corroborated by a real shell: a live process is unverifiable (no signal), a dead one is reported dead', async () => {
+    const Port = await loadPort()
+    const dir = tmp()
+    const live = realLongLivedProcess()
+    const gone = realLongLivedProcess()
+    const port = new Port()
+    writeIdentityEvidence(dir)
+    const macosSource = {
+      osStartMarkerSource: 'posix_ps_lstart',
+      osStartMarker: 'Mon Sep 21 00:00:00 2026'
+    }
+
+    const liveObservation = await port.observe(
+      null,
+      durableOf(live.pid as number, dir, macosSource)
+    )
+    const goneDurable = durableOf(gone.pid as number, dir, macosSource)
+    gone.kill()
+    await exited(gone)
+    const goneObservation = await port.observe(null, goneDurable)
+
+    expect.soft(liveObservation.kind).toBe('identity_unverifiable')
+    expect.soft(goneObservation.kind).toBe('confirmed_dead_unknown_cause')
+    expect.soft(live.exitCode === null && live.signalCode === null).toBe(true)
+  })
+
+  it('adoption never fabricates a process: adopting a pid that is not alive is rejected', async () => {
+    const Port = await loadPort()
+    const dir = tmp()
+    const real = realLongLivedProcess()
+    const deadPid = real.pid as number
+    real.kill()
+    await exited(real)
+
+    expect(() => new Port().spawn(adoptInput(deadPid, dir))).toThrow(
+      /delegated_process_adoption_failed/
+    )
   })
 
   it('PID reuse: the live process at the bound pid has a DIFFERENT incarnation marker -> identity_unverifiable, and it is left ALIVE (never signalled)', async () => {

@@ -18,7 +18,10 @@
 > record of the focused GREEN (`326b11e4fc973afa7e23d03a1f0d310933915cd1`)
 > rather than a rewrite. The `max-lines` violation itself was fixed by a
 > separate, later commit; this document is not amended to claim
-> `326b11e4` originally passed lint.
+> `326b11e4` originally passed lint. A later revision of this document
+> corrected a third inaccuracy that the first correction itself introduced
+> (the max-lines chronology); see "Verified max-lines chronology and
+> historical notes" after §11.
 
 ## 1. The blocker, restated
 
@@ -241,8 +244,9 @@ proxy for one.
   file under the ratchet. But `orca-runtime-create-terminal.ts` was **not**
   actually compacted enough to pass: at this commit (`326b11e4`) `oxlint`
   reports `eslint(max-lines): File has too many lines (303)` against a
-  300-line limit for that file (already 305 effective lines at focused RED,
-  before this diff touched it; this diff added 4 more). No
+  300-line limit for that file — a violation **introduced by this change**
+  (see "Verified max-lines chronology" below; an earlier revision of this
+  correction wrongly called it pre-existing). No
   `eslint-disable`/`oxlint-disable` suppression was added (confirmed by
   grep) — the file was simply left over budget while this document claimed
   otherwise. A separate, later focused-correction commit
@@ -251,9 +255,49 @@ proxy for one.
   already-present, unchanged object-literal expression into a local `const`
   evaluated at the same point in the same synchronous flow, then spread by
   reference instead of inline; zero behavior change — and restores a clean
-  `oxlint` run. That correction's own verification is recorded in its
-  commit message, not by editing the pass/fail claim above into a
-  retroactive pass.
+  `oxlint` run. That correction's verification is recorded in its commit
+  message (subject to the historical note below) and is not folded into
+  the pass/fail claim above as a retroactive pass.
+
+### Verified max-lines chronology and historical notes
+
+Final historical-evidence correction. Metric: the effective `max-lines`
+count for `src/main/runtime/orca-runtime-create-terminal.ts` (oxlint's
+non-blank, non-comment lines; limit 300).
+
+| Point in history | Commit | Effective max-lines | Status |
+| --- | --- | --- | --- |
+| Focused RED (pre-focused-GREEN) | `5c75a7db28190654834dd36f8894f3dac88c9bb9` | 299 | COMPLIANT |
+| Focused GREEN | `326b11e4fc973afa7e23d03a1f0d310933915cd1` | 303 | VIOLATION INTRODUCED BY THIS CHANGE |
+| Focused mechanical fix | `688d48a2eff1138bd37c7d42c5345234d095d530` | 297 | COMPLIANT |
+
+The focused GREEN's own evidence claimed lint was clean; that claim was
+false, as corrected above.
+
+**Raw vs effective.** The figure 305 is the raw physical-line count of the
+file at focused RED. It is a different measurement from the repository's
+effective `max-lines` metric and was incorrectly described as "effective
+lines" in an earlier revision of this correction and in the commit message
+below. The earlier independent rereview (`dc304e5894`, §30) likewise
+described the violation as pre-existing; that framing is superseded by the
+chronology above (its artifact is immutable and unchanged).
+
+**Commit-message history (not rewritten).** The commit message of
+`688d48a2eff1138bd37c7d42c5345234d095d530` contains the same inaccurate
+statement ("303 effective lines vs. 300 limit; already 305 at focused RED,
++4 from this diff"). That statement is historical metadata superseded by the
+verified chronology 299 → 303 → 297 above. The commit is intentionally not
+amended or rewritten; this document is the canonical clarification. That
+message also says no suite literally named PRE_IMPLEMENTATION exists and
+reports only a 2-file / 12-test subset; the accepted 7-file / 38-test set is
+recorded in `CUTOVER-CORE-GREEN-EVIDENCE.md` §19 and passes.
+
+**Review status.** The diagnostic rereview at commit
+`635f672a7d7b0c2333f18e6eee9e78d27336fedb` was authored by the same agent
+that authored `688d48a2ef`. It is diagnostic evidence only and is not
+independent acceptance; a fresh independent agent must still issue the
+terminal acceptance. The production candidate remains exactly `688d48a2ef`;
+this revision changes evidence text only.
 
 ## 12. Changed files
 

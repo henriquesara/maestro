@@ -79,25 +79,89 @@ proof is deferred because no live process needs re-identifying on H1.
   | State | Sidecar | Process | Binding | Legal next action | Forbidden |
   | --- | --- | --- | --- | --- | --- |
   | (a) placeholder only, no spawn | placeholder | none | none | retry spawn | — |
-  | (a′) placeholder, live process, marker capture failed *(added — see below)* | placeholder | **live, untracked** | none | **P1 must terminate the process via the identity-verified path, using the in-scope pid the callback already holds, before the exception is allowed to propagate — then rethrow so the existing D-5/P9 pre-commit-failure path takes over** | leaving the process running; writing a sidecar after the fact without re-verifying identity |
+  | (a′) placeholder, live process, marker capture failed *(added — see below; mechanism corrected per focused rereview `e0cb37e6ebd734b7b827fea8fd386567e89f17f8`)* | placeholder, incomplete | **live, still directly owned by the spawn call frame** | none | **close the exact process through the direct live-process handle the spawn call frame still owns (Mechanism A, below) — not a pid lookup — then reject the operation; `delegation_cutover` stays uncommitted** | releasing the process as delegated; any pid-based OS lookup+signal fallback; treating the placeholder sidecar as identity evidence |
   | (b) sidecar-with-pid, no binding | pid+marker | live or dead | none | pre-commit orphan C2 disposition (P9), corroborable from the sidecar alone (S4 §10.3) | signal without identity verification |
   | (c) both | pid+marker | live or dead | committed | normal lifecycle | — |
   | stale sidecar / path reuse | pid+marker (old) | different process may now own the pid | any | root drift/marker mismatch fails closed (A-4a) | ever signal on marker mismatch |
 
   "Binding without sidecar" must be unreachable and is asserted by the RED.
 
-  **(a′) is a real, reachable window, not hypothetical.** `captureOsStartMarkerSync` is a synchronous call
-  (`orca-runtime-delegated-cutover-callback.ts:49-56`) that can throw — timeout, access denial, process already
-  gone by the time it's probed — *after* the process has already spawned (pid captured into the box by
-  `local-pty-spawn.ts:116` before this callback ever runs) but *before* the sidecar rewrite this AD specifies,
-  which uses the very value this call was about to produce. A throw here means the rewrite never executes: the
-  sidecar stays at placeholder (state a) while a live process with a captured pid exists in memory, and nothing
-  today tears it down — the throw propagates through `spawnLocalPty` (no catch, D-5) and `createTerminal`'s
-  `finally` (releases a pane-creation lock only, D-5) with no process-teardown call anywhere on that path. This
-  is strictly worse than (a): (a) is a placeholder with no process; (a′) is a placeholder with a live,
-  durably-untracked process. **This is a P1-scope fix** (the same slice that owns this callback), not a new
-  slice and not a P9 dependency — P9 is about the commit being *rejected after being attempted* (D-5); this is
-  about the step *before* the commit is even attempted.
+  **Required correction (independent rereview §5/#1 of `e0cb37e6...`).** The original (a′) disposition said to
+  terminate "via the identity-verified path, using the in-scope pid" — but the identity verifier that phrase
+  names (`verifyRestartRecoveredIdentity`, `restart-recovered-identity-verification.ts:75-121`) requires a
+  sidecar match *and* a non-null `osStartMarker` compared against a fresh OS read (its own comment: "Sidecar-
+  plus-pid-exists alone is never sufficient on any platform"). In (a′), by construction, neither exists: the
+  sidecar is still placeholder and no marker was ever captured. Fed through that function, (a′) can only
+  return `identity_unverifiable` — it is not a mechanism that can execute here at all, and "using the in-scope
+  pid" as written was, in effect, undefined-mechanism cover for bare pid signalling, which this document's own
+  break-glass table (§11) already lists as **Forbidden** ("signal by pid"). The fix is not a weaker rule; it is
+  naming the *correct*, already-available, actually identity-safe mechanism for this specific window.
+
+  **Two process-control mechanisms — must not be conflated.**
+
+  **A. Pre-cutover spawn cleanup (state a′; what P1 actually needs here).** Applies only while: the process
+  was *just* spawned by this exact call; the *original spawning call frame* still holds the live process
+  handle in scope; `delegation_cutover` has **not** committed; the workload has **not** been released as
+  delegated. Control basis: **direct object/handle continuity to the exact spawned process** — not process
+  *rediscovery*. Source proof: `local-pty-spawn.ts:81` binds `spawnResult` (from `spawnShellWithFallback`) as a
+  local of `spawnLocalPty`; `spawnResult.process` is read at `:116` to capture the pid, and remains the same
+  in-scope local across the `await args.onPtySpawnCommitted()` call at `:118-119` — the exact call whose body
+  (`orca-runtime-delegated-cutover-callback.ts:49-56`) does the marker capture that can throw. A handler
+  wrapping that await can therefore call `spawnResult.process`'s own termination directly, by reference, with
+  **no OS-level pid lookup and no marker comparison of any kind** — safety here comes from holding the actual
+  object the OS handed back at spawn time, not from re-deriving "is this still the same process" after the
+  fact. This does **not** use `verifyRestartRecoveredIdentity` and does **not** depend on sidecar+pid+marker,
+  because it isn't recovering an identity — it never let go of one.
+
+  **B. Post-cutover / restart control (unchanged, not this state).** Applies once the original handle is lost
+  — after a restart, or once delegated authority has committed. Control basis: durable identity evidence + pid
+  + required incarnation/start-marker proof + fresh re-verification (`verifyRestartRecoveredIdentity`, AD-4).
+  No pid-only downgrade is ever legal here either; this path is unchanged by this correction.
+
+  **Pid is not identity.** The pid captured into `preparedDelegatedProcessIdentityCapture` does **not**, by
+  itself, authorize termination in any state. In (a′) the safety proof is *"same live object the spawn call
+  returned,"* never *"pid equality."* If Mechanism A's handle is ever lost (e.g. the cleanup code only has a
+  bare pid to work with, not the object), the forbidden fallback of pid → OS lookup → signal is not
+  permitted — that is exactly the `identity_unverifiable` case Mechanism B already covers, and it does not
+  become legal merely because the window is early. The frozen invariant is unchanged: sidecar-plus-pid alone
+  is never sufficient for restart/recovered signalling (S4 §9.1.2, `restart-recovered-identity-verification.ts:73`).
+
+  **Cleanup failure.** If the direct-handle termination itself throws, cannot terminate the process, or cannot
+  be confirmed: `delegation_cutover` remains uncommitted; the workload remains unreleased; the operation fails
+  closed; there is no `ORCA_DELEGATED` transition; there is no pid-only retry of the kill; there is no
+  automatic native-workload fallback. The condition is an unresolved pre-cutover cleanup failure — a P1
+  `LIVE_PROOF_REQUIRED`/observability obligation (§12 below), not a new persisted incident kind or table; no
+  second incident taxonomy is introduced.
+
+  **Partial sidecar disposition.** A partial/placeholder sidecar is never verified process identity. In (a′)
+  no new mechanism is needed to enforce this: the placeholder was never rewritten with a pid or marker, so it
+  structurally cannot satisfy `verifyRestartRecoveredIdentity`'s check 3 (`osStartMarker` non-null) even if
+  some future caller mistakenly tried, and no `dispatch_process_binding` row exists for it to be read against
+  in the first place (AD-2's own invariant: a committed binding requires a sidecar-with-pid to have existed
+  first — never the reverse). The placeholder is left in place, explicitly incomplete/ineligible; P1 may
+  remove or tombstone it as housekeeping, but that is an implementation choice, not a safety requirement — no
+  second identity protocol is introduced.
+
+  **Retry.** A retry after (a′) begins a **fresh** process-identity lifecycle (new spawn, new capture) and
+  must not adopt the incomplete (a′) sidecar as evidence of anything. If the Mechanism-A cleanup's outcome is
+  itself uncertain (the "cleanup failure" case above), a new delegated cutover for that dispatch stays blocked
+  until the pre-cutover cleanup is resolved — never two live workloads for the same logical attempt.
+
+  **Break-glass consistency (§11).** "Signal without reconstructed identity: Forbidden" is unchanged and is
+  **not** relaxed by this correction. Mechanism A is not an exception to it: it never reconstructs or rediscovers
+  an identity, because the process is never lost in the first place — the spawn call frame's ownership of the
+  handle is continuous from spawn through the failed callback. No general pid-signalling exception is
+  introduced anywhere by this fix.
+
+  **Authority.** (a′) occurs strictly before cutover commit, so authority remains `AICONTROL_NATIVE` throughout
+  — this does not change. This also does **not** authorize automatically restarting native execution for the
+  failed attempt: the spawn/cutover attempt is simply aborted (fails closed, per "Cleanup failure" above). No
+  dual authority, no fallback.
+
+  This is strictly worse than (a): (a) is a placeholder with no process; (a′) is a placeholder with a live
+  process the spawn call frame still directly owns. **This is a P1-scope fix** (the same slice that owns this
+  callback), not a new slice and not a P9 dependency — P9 is about the commit being *rejected after being
+  attempted* (D-5); this is about the step *before* the commit is even attempted.
 - **Root.** Resolved through `resolveDurableShadowLifecycleRoot` (persisted in `execution_meta`, drift/loss
   fail-closed) — not the raw `join` the composition uses today.
 - **Capture box widening (mechanism-only).** `preparedDelegatedProcessIdentityCapture.current` gains
@@ -378,12 +442,19 @@ superseded (R-2). No RED. Acceptance: independent architecture review verdict
   data only); callback, coordinator, composition.
 - **Genuine RED:** through the real callback/coordinator with a real child process (no test-written sidecar):
   sidecar-with-pid exists before the `delegation_cutover` row; fresh-process `observe` returns verified
-  `still_running`; crash windows (after placeholder, after pid rewrite, after commit); **marker-capture failure
-  after spawn (state a′, independent review §6) ⇒ the live process is terminated via the identity-verified path
-  using the in-scope pid before the exception propagates, sidecar remains placeholder, no durable orphan**;
-  binding-without-sidecar unreachable; root drift fails closed; recycled pid (per A-4b) ⇒
-  `confirmed_dead_unknown_cause`, else the frozen `identity_unverifiable`; macOS live pid still
-  `identity_unverifiable` (negative control); static: no second sidecar writer.
+  `still_running`; crash windows (after placeholder, after pid rewrite, after commit); binding-without-sidecar
+  unreachable; root drift fails closed; recycled pid (per A-4b) ⇒ `confirmed_dead_unknown_cause`, else the
+  frozen `identity_unverifiable`; macOS live pid still `identity_unverifiable` (negative control); static: no
+  second sidecar writer. **Marker-capture failure after spawn (state a′, AD-2, mechanism corrected per focused
+  rereview `e0cb37e6...`) — explicit RED obligations:** (1) spawn returns the exact live process handle
+  (`spawnResult.process`); (2) pid is captured from it; (3) marker capture is forced to fail (fault injection);
+  (4) the cutover callback never commits `delegation_cutover`; (5) the workload is never released as delegated;
+  (6) the exact live process is terminated through the direct handle held by the spawn call frame (Mechanism A
+  above), never by pid lookup; (7) no pid-only signalling occurs anywhere on this path (static + dynamic
+  check); (8) the surviving placeholder sidecar cannot verify (fed through `verifyRestartRecoveredIdentity`,
+  asserts `identity_unverifiable`); (9) a forced direct-handle teardown failure fails closed — no commit, no
+  `ORCA_DELEGATED` transition, no pid-only retry, no native-workload fallback; (10) a retry after (a′) begins a
+  fresh identity lifecycle and does not adopt the stale placeholder as evidence.
 - **Gates moved:** 7, 38, 50 → `IMPLEMENTATION_PROVEN` (Windows/Linux); new `PL-4`.
 - **Prereq:** P0. **Repos:** M.
 

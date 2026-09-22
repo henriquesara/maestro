@@ -178,7 +178,13 @@ cutover_at`. (iv) Copy at cutover into additive nullable `delegation_cutover.tim
 is immutable after insert like every other except `ack_status`. (v) The lifecycle pass decides
 `now ≥ cutover_at + timeout_ms` from durable values and records `teardown_reason='timeout'` (first writer wins,
 X13) before any signal. (vi) No in-memory timer is authoritative. The numeric value and the sign-off owner are a
-product decision **not made here**.
+product decision **not made here**. (vii) **Clock-jump behavior (independent review §11/§26 — required
+correction).** The deadline is computed fresh as `cutover_at + timeout_ms` on each lifecycle pass from durable
+UTC timestamps; there is no persisted absolute deadline to desynchronize. A wall-clock jump (forward or
+backward) can only move the *computed* comparison, never the durable inputs (`cutover_at`, `timeout_ms`): a
+backward jump delays the decision by the jump amount, a forward jump advances it by the same amount, and
+neither corrupts durable state or produces a spurious timeout write, because the comparison is re-derived on
+every pass, not accumulated.
 
 **Affected clauses.** S5 §8.1 (one added immutable column), §12 Timeout bullet, §21 item 1 (resolved).
 
@@ -192,7 +198,11 @@ default host is the daemon adapter, which is not delegated-eligible, so a delega
 the host decision (ARCH AD-1: H1 for the first controlled workload, H2 tracked separately); no change to the
 capability contract or the eligibility gate (§7.3). Any future provider (including the daemon adapter) must
 declare `supportsDelegatedCutoverHold` and clear gates 31-63 before delegating. In-process node-pty survival
-across a host restart is **not** assumed.
+across a host restart is **not** assumed. **Restart-scope boundary (independent review §7 — required
+correction, packaged with this amendment):** the H1 first-controlled-activation restart acceptance (ARCH §10)
+is scoped to `FIRST_CONTROLLED_ACTIVATION_ACCEPTANCE` only and must not be read as
+`GENERAL_DELEGATED_RESTART_CONVERGENCE`; see ARCH §10 for the exact boundary sentence and the H2 milestone that
+removes it.
 
 ---
 

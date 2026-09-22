@@ -7,9 +7,16 @@ live `ORCA_DELEGATED` were not started. Companion documents: `PRE-LIVE-PRODUCTIO
 amendments — **not frozen, not accepted**).
 
 ```
-state_class:     PRELIVE_PRODUCTIONIZATION_ARCHITECTURE_READY_FOR_REVIEW
-display_verdict: ORCA_S5_PRELIVE_PRODUCTIONIZATION_ARCHITECTURE_READY_FOR_INDEPENDENT_REVIEW
+state_class:     ARCHITECTURE_CORRECTED_READY_FOR_FOCUSED_REREVIEW
+display_verdict: ORCA_S5_PRELIVE_PRODUCTIONIZATION_ARCHITECTURE_CORRECTED_READY_FOR_FOCUSED_REREVIEW
 ```
+
+**Correction provenance.** Corrected on top of the independent architecture review
+(`8970df4affaf80227a819a1efe2ae9b0f9945213`, `PRE-LIVE-PRODUCTIONIZATION-ARCHITECTURE-REVIEW.md`), which found
+this candidate directionally sound with three required corrections plus one added sentence to A-7. This document
+closes the review's D-7 correction (§9/§10 of the review); see `PRE-LIVE-PRODUCTIONIZATION-ARCHITECTURE.md` for
+the B-1 and AD-1/H1 corrections and `PRE-LIVE-SPEC-AMENDMENT-CANDIDATE-001.md` for the A-7 addition. Not yet
+frozen; pending focused re-review of these corrections.
 
 Every statement below is sourced to a file:line read in this session unless tagged `[UNVERIFIED]`
 (a claim I could not prove from source on this Windows host; each is turned into a RED obligation in the
@@ -95,9 +102,11 @@ pre-commit orphan class identity-corroborable from the sidecar alone) and §10.3
 - *Before cutover commit?* Yes: S4 §9.2's invariant "committed binding ⇒ sidecar written before the commit"
   applies verbatim. It cannot be inside the SQLite transaction (filesystem), so the correlation is
   ordering + the shared `orcaDispatchId`/`processNonce`.
-- *Transactionally correlated?* Not transactional; three durable states are legal and enumerated in the
-  architecture doc (placeholder-only, sidecar+pid without binding = pre-commit orphan C2, sidecar+binding).
-  "Binding without sidecar" must become unreachable.
+- *Transactionally correlated?* Not transactional; the legal durable states are enumerated in the architecture
+  doc's corrected crash matrix (§6 of the independent review): placeholder-only; placeholder with a **live,
+  untracked** process when marker capture fails after spawn (a real reachable window, corrected per review —
+  see ARCH AD-2); sidecar+pid without binding = pre-commit orphan C2; sidecar+binding. "Binding without
+  sidecar" must become unreachable.
 - *Process exits between spawn and evidence persistence:* pid absent ⇒ `confirmed_dead_unknown_cause`
   (`shadow-lifecycle-process-adapter.ts:151`, needs no sidecar) ⇒ honest `NULL` classification + incident.
   If the pid was recycled, S4 §9.3 currently yields `identity_unverifiable` (blocked forever); see A-4(b).
@@ -302,11 +311,18 @@ defined encoding of `finishedAt` (string in Maestro, `Date` in aiControl).
   (`isOrcaFenceAcquisitionEnabled()` reads `process.env`, default false). The verification method is
   explicitly unprescribed (prerequisite §16 item 5). New aiControl code (P7, P8) enlarges the definition of
   "fence-aware".
-- **aiControl-side audit item (unverified reachability).** `runner.ts:195-200` `failRunNoEligibilityChange`
-  writes `status='failed'` with `WHERE id = runId` only — no `orca_fence_state` guard (called at `:227,319,392,414`
-  inside `runAgent`). The prerequisite classifies `runAgent` as "MUST CHECK FENCE" at the claim, but this
-  pre-claim failure write is unguarded. Whether a fenced/cutover row can reach it is **not established
-  here**; it is a PRE_LIVE audit obligation (P7/P11), not a claimed defect.
+- **aiControl-side audit item — corrected per independent review §9 (D-7 reclassified `PARTIALLY_CONFIRMED`,
+  scope expanded ~12x).** `runner.ts:195-200` `failRunNoEligibilityChange` is real and syntactically unguarded
+  (no `orca_fence_state` predicate), but it is **one of 12** raw, unguarded `agentRuns.status` writers in
+  `runner.ts` alone (sites at lines 198, 253, 272, 343, 358, 371, 554, 568, 619, 638, 665, 817 — all lexically
+  inside `runAgent` or `executeClaimedRun`). The independent review found and *proved*, not merely flagged, that
+  all 12 are **structurally unreachable** for `orca_fence_state != 'none'`: both production call chains into
+  these functions (`runAgent`'s own leading `claimRunForExecution` CAS, and `scheduler.ts`'s dequeue CAS
+  preceding its direct call to `executeClaimedRun`) require `orca_fence_state='none'` to succeed, and nothing
+  between either claim and any of the 12 writes changes `orca_fence_state` back. This sharpens "not established
+  here" into a structural proof — the remaining audit obligation is not *whether* these 12 are reachable (they
+  are not, by construction), but *auditing every current and future `agentRuns.status` writer to the same
+  standard*, per the corrected P7b acceptance criterion in the architecture document.
 - **Timeout.** aiControl's timeout is `getTimeoutMs()` → setting `execution.timeout_ms` (default 120 s, clamp
   ≥1 s and ≤600 s), read at execution time (`runner.ts:673`); `agent_runs` has no timeout column. So the SLA
   is a global aiControl setting Orca cannot see and that is not stored per run. S5 §12/§21 item 1 froze the
@@ -326,7 +342,7 @@ These were found while tracing; several dominate the plan.
 | **D-4** | Phase 4 acknowledgement (S9) and fence release (§6.1) have no Maestro implementation; `ack_status` is never written; `pre_cutover_orphan_process` and `safeReleaseOrcaFence` appear in **no** production file. "Fence acquired but Orca cannot start" leaves the run `fenced` with no automated path. | MPC | greps |
 | **D-5** | **Pre-commit rejection cleanup is not implemented.** `spawnLocalPty` awaits the commit with no `try/catch` or teardown (`local-pty-spawn.ts:119`); `createTerminal`'s catch only releases the registration fence. SPEC §4.5/§5.8/X15 (gates 35, 51) require the just-spawned process to be terminated via the identity-verified path. Prior artifacts classify gate 35 `ALREADY_GREEN_PREIMPLEMENTATION`; I could not locate an implementation or a test asserting it. `[UNVERIFIED — treat as open; P9 RED decides]` | MPC | source |
 | **D-6** | **Alternate kill paths.** Gate 27's static audit covered `signalProcessTree` sites in `execution/`. The PTY layer has many other stop/kill entry points (runtime controller `stopAndWait`, `stop-terminals-for-worktree`, terminal-close CLI, app shutdown). Any of them can terminate a delegated PTY without a durable `teardown_reason`, yielding `NULL`/incident at best. Non-exhaustive here; an exhaustive inventory is the first task of P3. | AD | |
-| **D-7** | aiControl `failRunNoEligibilityChange` unguarded write (B-9). | POP | `runner.ts:195` |
+| **D-7** | aiControl has **12** raw unguarded `agentRuns.status` writers in `runner.ts` (not just the 1 originally cited); independent review §9 proved all 12 structurally unreachable for a fenced/cutover row via both production call chains, but the audit obligation (P7b) must now cover all 12, plus a ratchet against future writers (B-9). | POP | `runner.ts:198,253,272,343,358,371,554,568,619,638,665,817` |
 | **D-8** | The site-#5 callback fabricates `orcaRunId`, `orgTaskId`, `governanceAgentRunId` and leaves `aicontrolRunId` null; `run_binding` identity refs are placeholders beyond path/base. | MPC | coordinator `:164-168` |
 | **D-9** | Host quit/crash policy for a live delegated run (graceful quit kills local PTYs) is unfrozen; SPEC §9.2's reason map has only `user_cancel`/`timeout`. Under the frozen text it degrades to `NULL` + incident (honest, safe). | UPP | |
 
@@ -368,7 +384,7 @@ carry `LIVE_PROOF_REQUIRED`.
 | 8 | uncertainty never auto-spawns | `IMPLEMENTATION_PROVEN` | no spawn path exists in the sweep |
 | 9 | ack-loss resolves on restart/retry | `NOT_STARTED` | no ack implementation (D-4) → P8 |
 | 10 | aiControl ack idempotency | `NOT_STARTED` | aiControl fn proven; no caller → P8 |
-| 11, 12 | native exec/settlement impossible post-fence | `PRE_LIVE_REQUIRED` | proven by aiControl prerequisite; residual D-7 audit → P7/P11 |
+| 11, 12 | native exec/settlement impossible post-fence | `PRE_LIVE_REQUIRED` | proven by aiControl prerequisite; residual D-7 terminal-writer ratchet (12 `runner.ts` sites independently proven unreachable; ratchet must classify every current and future `agentRuns.status` writer, not a fixed list) → P7b/P11 |
 | 13, 14 | `completed` / `failed` | `DORMANT_IMPLEMENTATION` | classification proven for observed `self_exit`; real PTY unreachable (B-2) → P2 |
 | 15, 16 | `cancelled` / `timeout` | `DORMANT_IMPLEMENTATION` | classification proven; signal semantics unsafe (B-3), timeout decision path NOT_STARTED (B-9) → P3, P6b |
 | 17 | `cancelled ≠ timeout` | `IMPLEMENTATION_PROVEN` | durable, restart-stable; `LIVE_PROOF_REQUIRED` |

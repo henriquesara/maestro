@@ -7,10 +7,16 @@ It does not amend the frozen S5 SPEC: every place it needs the SPEC to say somet
 test, schema, migration or aiControl file is changed by this document.
 
 ```
-state_class:     PRELIVE_PRODUCTIONIZATION_ARCHITECTURE_READY_FOR_REVIEW
-display_verdict: ORCA_S5_PRELIVE_PRODUCTIONIZATION_ARCHITECTURE_READY_FOR_INDEPENDENT_REVIEW
+state_class:     ARCHITECTURE_CORRECTED_READY_FOR_FOCUSED_REREVIEW
+display_verdict: ORCA_S5_PRELIVE_PRODUCTIONIZATION_ARCHITECTURE_CORRECTED_READY_FOR_FOCUSED_REREVIEW
 base:            origin/main 1f70bdf4992ae920aed56de905edb0463faa8657
 ```
+
+**Correction provenance.** Corrected on top of the independent architecture review
+(`8970df4affaf80227a819a1efe2ae9b0f9945213`, `PRE-LIVE-PRODUCTIONIZATION-ARCHITECTURE-REVIEW.md`), which found
+this candidate directionally sound with three required corrections: §6 (B-1 marker-capture-failure disposition,
+AD-2 below), §7 (AD-1/H1 restart-scope boundary, AD-1 and §10 below), §9/§10 (D-7/P7b terminal-writer audit
+scope, P7b below). Not yet frozen; pending focused re-review of these corrections.
 
 Operational state throughout: authority `AICONTROL_NATIVE`; `ORCA_DELEGATED` NOT STARTED; fence acquisition
 DISABLED; R3 NOT STARTED; M5 NOT STARTED.
@@ -52,8 +58,9 @@ Facts (GAP D-1): the default production host is the daemon adapter, which is not
 implemented and proven for — and register **H2 as a separate later track** (`LIVE_PROOF_REQUIRED` for gates
 7/38/50 on a surviving process; broad activation is *not* claimed before it). Reject H3 (it redesigns the frozen
 execution semantics the mission forbids redesigning). **Consequence:** the first-workload "restart" scenario is
-defined for H1 (§10); B-1's sidecar is still required (recycled-pid safety, pre-commit orphan corroboration) and
-B-4's signal-grade macOS proof is deferred because no live process needs re-identifying on H1.
+defined for H1 (§10 — see the restart-acceptance scope boundary added there per independent review §7); B-1's
+sidecar is still required (recycled-pid safety, pre-commit orphan corroboration) and B-4's signal-grade macOS
+proof is deferred because no live process needs re-identifying on H1.
 
 ### AD-2 — Identity evidence for a real PTY process (B-1, B-4) — resolution under the frozen SPEC, plus one refinement
 
@@ -65,10 +72,32 @@ B-4's signal-grade macOS proof is deferred because no live process needs re-iden
   transaction* — rewrite the sidecar in place with `spawnedAt, pid, osStartMarker, osStartMarkerSource`. The
   port's `spawn(adopt)` is called here so adoption is a real, exercised step (closes the B-7 half "port not
   wired").
-- **Invariant.** Committed `dispatch_process_binding` ⇒ sidecar-with-pid existed before the commit. Legal
-  durable states: (a) placeholder only (crash before spawn — harmless); (b) sidecar-with-pid, no binding
-  (pre-commit orphan C2 — corroborable from the sidecar alone, S4 §10.3; disposition in P9); (c) both. "Binding
-  without sidecar" must be unreachable and is asserted by the RED.
+- **Invariant.** Committed `dispatch_process_binding` ⇒ sidecar-with-pid existed before the commit. **Legal
+  durable states — corrected per independent review §6 (required correction; superset of the original
+  three-state enumeration):**
+
+  | State | Sidecar | Process | Binding | Legal next action | Forbidden |
+  | --- | --- | --- | --- | --- | --- |
+  | (a) placeholder only, no spawn | placeholder | none | none | retry spawn | — |
+  | (a′) placeholder, live process, marker capture failed *(added — see below)* | placeholder | **live, untracked** | none | **P1 must terminate the process via the identity-verified path, using the in-scope pid the callback already holds, before the exception is allowed to propagate — then rethrow so the existing D-5/P9 pre-commit-failure path takes over** | leaving the process running; writing a sidecar after the fact without re-verifying identity |
+  | (b) sidecar-with-pid, no binding | pid+marker | live or dead | none | pre-commit orphan C2 disposition (P9), corroborable from the sidecar alone (S4 §10.3) | signal without identity verification |
+  | (c) both | pid+marker | live or dead | committed | normal lifecycle | — |
+  | stale sidecar / path reuse | pid+marker (old) | different process may now own the pid | any | root drift/marker mismatch fails closed (A-4a) | ever signal on marker mismatch |
+
+  "Binding without sidecar" must be unreachable and is asserted by the RED.
+
+  **(a′) is a real, reachable window, not hypothetical.** `captureOsStartMarkerSync` is a synchronous call
+  (`orca-runtime-delegated-cutover-callback.ts:49-56`) that can throw — timeout, access denial, process already
+  gone by the time it's probed — *after* the process has already spawned (pid captured into the box by
+  `local-pty-spawn.ts:116` before this callback ever runs) but *before* the sidecar rewrite this AD specifies,
+  which uses the very value this call was about to produce. A throw here means the rewrite never executes: the
+  sidecar stays at placeholder (state a) while a live process with a captured pid exists in memory, and nothing
+  today tears it down — the throw propagates through `spawnLocalPty` (no catch, D-5) and `createTerminal`'s
+  `finally` (releases a pane-creation lock only, D-5) with no process-teardown call anywhere on that path. This
+  is strictly worse than (a): (a) is a placeholder with no process; (a′) is a placeholder with a live,
+  durably-untracked process. **This is a P1-scope fix** (the same slice that owns this callback), not a new
+  slice and not a P9 dependency — P9 is about the commit being *rejected after being attempted* (D-5); this is
+  about the step *before* the commit is even attempted.
 - **Root.** Resolved through `resolveDurableShadowLifecycleRoot` (persisted in `execution_meta`, drift/loss
   fail-closed) — not the raw `join` the composition uses today.
 - **Capture box widening (mechanism-only).** `preparedDelegatedProcessIdentityCapture.current` gains
@@ -349,10 +378,12 @@ superseded (R-2). No RED. Acceptance: independent architecture review verdict
   data only); callback, coordinator, composition.
 - **Genuine RED:** through the real callback/coordinator with a real child process (no test-written sidecar):
   sidecar-with-pid exists before the `delegation_cutover` row; fresh-process `observe` returns verified
-  `still_running`; crash windows (after placeholder, after pid rewrite, after commit); binding-without-sidecar
-  unreachable; root drift fails closed; recycled pid (per A-4b) ⇒ `confirmed_dead_unknown_cause`, else the
-  frozen `identity_unverifiable`; macOS live pid still `identity_unverifiable` (negative control);
-  static: no second sidecar writer.
+  `still_running`; crash windows (after placeholder, after pid rewrite, after commit); **marker-capture failure
+  after spawn (state a′, independent review §6) ⇒ the live process is terminated via the identity-verified path
+  using the in-scope pid before the exception propagates, sidecar remains placeholder, no durable orphan**;
+  binding-without-sidecar unreachable; root drift fails closed; recycled pid (per A-4b) ⇒
+  `confirmed_dead_unknown_cause`, else the frozen `identity_unverifiable`; macOS live pid still
+  `identity_unverifiable` (negative control); static: no second sidecar writer.
 - **Gates moved:** 7, 38, 50 → `IMPLEMENTATION_PROVEN` (Windows/Linux); new `PL-4`.
 - **Prereq:** P0. **Repos:** M.
 
@@ -421,10 +452,22 @@ superseded (R-2). No RED. Acceptance: independent architecture review verdict
   **Gates:** 19, 20, 21. **Prereq:** none (parallel). **Publication:** first (behaviour is unreachable while
   acquisition is disabled).
 
-### P7b — aiControl Fence-Guard Audit
-Audit every `agent_runs` status writer for reachability on `fenced`/`cutover` rows, starting with
-`runner.ts:195-200` (`failRunNoEligibilityChange`, unguarded, called at `:227,319,392,414`). Outcome per writer:
-proven unreachable (with a test) or guarded like `orphan-recovery.ts:433`. **Gates:** 11, 12 → `PRE_LIVE` closed.
+### P7b — aiControl Fence-Guard Audit — **acceptance criterion corrected per independent review §9**
+A static, CI-enforced **ratchet** (not a one-time list) enumerating every `agentRuns.status` writer in the
+aiControl tree. The independent review's own exhaustive search found 12 raw, unguarded writers in `runner.ts`
+alone (sites 198, 253, 272, 343, 358, 371, 554, 568, 619, 638, 665, 817, all inside `runAgent`/
+`executeClaimedRun` — not the single site originally cited), plus writers already classified `FENCE_GUARDED`
+(`run-claim.ts:39`, `scheduler.ts:127`, `orphan-recovery.ts:400`, `run-finalizer.ts:209`) and
+`ROUTED_THROUGH_CANONICAL_PROJECTION` (`orca-fence-projection.ts:52`). The ratchet must prove each writer is
+exactly one of: `FENCE_GUARDED` (has its own `orca_fence_state` predicate on the write),
+`PROVEN_UNREACHABLE_FOR_FENCED_RUN` (structural proof via its unique call chain — the independent review
+demonstrated this for all 12 `runner.ts` sites via the claim-CAS argument: both production call chains require
+`orca_fence_state='none'` at the claim, and nothing between claim and write changes it back), or
+`ROUTED_THROUGH_CANONICAL_PROJECTION`. **Zero tolerance for a writer that is merely `[UNVERIFIED]` at PRE_LIVE
+freeze time; a new writer added later fails CI until classified.** Same slice, same repo, same "no change to
+production logic" scope as originally declared — only the acceptance bar moves, from "classify the one cited
+writer" to "ratchet every writer, present and future." **Gates:** 11, 12 → `PRE_LIVE_REQUIRED` (not closed)
+until the ratchet exists and every current writer is classified.
 
 ### P8s / P8c — aiControl Delegation API + Maestro Adapter
 See AD-10. **P8s (A):** four routes, auth, gate-off ⇒ `ACQUISITION_DISABLED`, 1:1 outcome mapping; contract
@@ -523,7 +566,10 @@ step's rollback requires deleting durable facts.
 
 **A. aiControl fleet and API**
 - PL-1 Every aiControl process capable of a native CAS runs fence-aware code (R2), **proven** by the R3 method
-  (recorded process/build-SHA inventory), *including* P7/P7b/P8s code.
+  (recorded process/build-SHA inventory), *including* P7/P7b/P8s code **and a passing result from the P7b
+  terminal-writer ratchet's classification of every `agentRuns.status` writer** (independent review §9/§24
+  correction: a fence-aware *process* is not the same claim as a fence-aware *every status writer in that
+  process* — the two are related but must not be conflated).
 - PL-2 P7 (projector divergence) published and independently accepted; P7b audit closed (unreachable/guarded).
 - PL-3 The delegation API is deployed gate-off and its contract tests pass; auth secret provisioned on both sides.
 **B. Identity, exit, signal**
@@ -562,6 +608,16 @@ cancellation-safe (a variant that ignores `SIGTERM` exercises P3 escalation); ob
 supervised, one run at a time; **Windows or Linux only**; local provider host per AD-1; disposable branch and
 worktree; run first against a **disposable aiControl environment**, and against the canonical operational DB
 only after PL-16/PL-17.
+
+**Restart-acceptance scope boundary — required correction, independent review §7.** The (S5) restart scenario
+below tests only `FIRST_CONTROLLED_ACTIVATION_ACCEPTANCE`: for this specific disposable, deterministic,
+manually-supervised first workload on host H1, an unrecoverable restart producing
+`confirmed_dead_unknown_cause` → `NULL` + incident (no reclassification, no respawn, no fallback) is an
+acceptable outcome for a single controlled run. **This restart acceptance is scoped to
+`FIRST_CONTROLLED_ACTIVATION_ACCEPTANCE` only. It does not establish, and must not be cited as establishing,
+`GENERAL_DELEGATED_RESTART_CONVERGENCE`.** The milestone that removes this boundary is H2 (daemon-hosted
+delegation, AD-1) reaching `LIVE_PROOF_REQUIRED` closure on gates 7/38/50 for a process that survives a
+Maestro restart.
 
 Acceptance scenarios (each recorded with durable-fact evidence): (S1) dispatch → cutover → `completed` (exit
 0); (S2) `failed` (nonzero exit); (S3) `cancelled` via the operator surface; (S4) `timeout` from the configured
